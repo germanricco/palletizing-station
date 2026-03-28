@@ -22,7 +22,6 @@ private:
     float _minPulseFloat;
     float _maxPulseFloat;
 
-    float _minSpeed;						/**< Velocidad minima umbral para evitar estancamiento */
     float _maxSpeed;						/**< Limite superior de incremento por ciclo */
     float _stepSize;						/**< Magnitud y direccion del vector de velocidad */
 	float _currentCCR;						/**< Representacion continua de coma flotante de la posicion actual */
@@ -38,10 +37,9 @@ public:
      * @param maxSpeed Incremento máximo de posición por actualización.
      */
     Servo(volatile uint32_t* ccr_register,
-    		uint32_t minP,
-			uint32_t maxP,
-			uint32_t homeP,
-			float minSpeed,
+    		float minAngle,
+			float maxAngle,
+			float homeAngle,
 			float maxSpeed);
 
     /**
@@ -73,12 +71,6 @@ public:
      * @param newMaxSpeed Nuevo límite estrictamente positivo.
      */
     void setMaxSpeed(float newMaxSpeed);
-
-    /**
-     * @brief Modifica la velocidad mínima admisible antes de la detención.
-     * @param newMinSpeed Nuevo límite estrictamente positivo y menor a maxSpeed.
-     */
-    void setMinSpeed(float newMinSpeed);
 
     /**
      * @brief Computa la posición angular actual basándose en interpolación lineal.

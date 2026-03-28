@@ -10,15 +10,16 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
-Servo::Servo(volatile uint32_t* ccr_register, uint32_t minP, uint32_t maxP,
-		uint32_t homeP, float minSpeed, float maxSpeed)
+Servo::Servo(volatile uint32_t* ccr_register, float minAngle, float maxAngle,
+		float homeAngle, float maxSpeed)
     : _ccr_reg(ccr_register),
-      _minPulse(minP),
-      _maxPulse(maxP),
-	  _homePulse(homeP),
-	  _minSpeed(minSpeed),
 	  _maxSpeed(maxSpeed),
 	  _stepSize(0.0f){
+
+	// Transformacion del dominio angular al dominio temporal (ancho de pulso)
+	_minPulse = static_cast<uint32_t>((minAngle * 100.0f / 9.0f) + 500.0f);
+	_maxPulse = static_cast<uint32_t>((maxAngle * 100.0f / 9.0f) + 500.0f);
+	_homePulse = static_cast<uint32_t>((homeAngle * 100.0f / 9.0f) + 500.0f);
 
 	// Precalculo de limites flotantes
 	_minPulseFloat = static_cast<float>(_minPulse);
@@ -59,12 +60,7 @@ void Servo::setVelocityCommand(float velocityFactor) {
         return;
     }
 
-    // Insercion de la velocidad umbral minima con preservacion de signo
-    if (absVelocidad < _minSpeed){
-    	_stepSize = (velocidadTeorica < 0.0f) ? -_minSpeed : _minSpeed;
-    } else {
-    	_stepSize = velocidadTeorica;
-    }
+    _stepSize = velocidadTeorica;
 }
 
 void Servo::updatePosition() {
@@ -80,33 +76,21 @@ void Servo::updatePosition() {
         }
 
         // Ejecucion en registro
-        *_ccr_reg = static_cast<uint32_t>(_currentCCR);
+        *_ccr_reg = static_cast<uint32_t>(_currentCCR + 0.5f);
     }
 }
 
 void Servo::setMaxSpeed(float newMaxSpeed) {
     if (newMaxSpeed > 0.01f) {
         _maxSpeed = newMaxSpeed;
-
-        // Prevencion de estados ilogicos de configuracion
-        if (_minSpeed > _maxSpeed) {
-        	_minSpeed = _maxSpeed * 0.01f;
-        }
-    }
-}
-
-void Servo::setMinSpeed(float newMinSpeed) {
-    if (newMinSpeed >= 0.0f && newMinSpeed < _maxSpeed) {
-    	_minSpeed = newMinSpeed;
     }
 }
 
 float Servo::getAngleDegrees() const {
-    // (180.0f / Rango) * (ValorActual - DesplazamientoMinimo)
-    return (180.0f / (_maxPulseFloat - _minPulseFloat)) * (_currentCCR - _minPulseFloat);
+	return (_currentCCR - 500.0f) * 0.09f;
 }
 
 float Servo::getAngleRadians() const {
 	// (PI / Rango) * (ValorActual - DesplazamientoMinimo
-    return (M_PI / (_maxPulseFloat - _minPulseFloat)) * (_currentCCR - _minPulseFloat);
+	return (_currentCCR - 500.0f) * (M_PI / 2000.0f);
 }
