@@ -1,4 +1,5 @@
 "./App/Src/Joystick.o"
+"./App/Src/Logger.o"
 "./App/Src/Servo.o"
 "./App/Src/TerminalSerial.o"
 "./App/Src/main_cpp.o"

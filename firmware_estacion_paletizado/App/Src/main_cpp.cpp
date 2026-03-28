@@ -1,9 +1,8 @@
 #include "main_cpp.hpp"
 #include "Joystick.hpp"
 #include "Servo.hpp"
-//#include "MotorDC.hpp"
-//#include "GeneradorTrayectoria.hpp"
 #include "TerminalSerial.hpp"
+#include "Logger.hpp"
 
 #include "stm32f1xx_hal.h"
 #include <cstdio>
@@ -74,6 +73,9 @@ void Cpp_Main_Init(void) {
     // Inicia interrupcion de recepcion de la terminal
     terminal.init();
 
+    // Inicializacion de Logger utilizando terminal para envio de datos mediante DMA
+    Logger::init(&terminal, LogLevel::Debug);
+
     // Inicializa el temporizador global
     tiempo_ultimo_envio_uart = HAL_GetTick();
 }
@@ -87,23 +89,17 @@ void Cpp_Main_Loop(void) {
 	// Transferir la intencion al actuador (-1.0 a 1.0)
 	servo_base.setVelocityCommand(joystick_izquierdo.ObtenerX());
 
-	// Recepcion de interrupcion externa por pulsadores
-	if (bandera_boton == 1) {
-		bandera_boton = 0;
-	    joystick_izquierdo.NotificarInterrupcion(pin_interrupcion);
-	    //joystick_derecho.NotificarInterrupcion(pin_interrupcion);
-	}
-
-	// Procesamiento Diferido (Antirrebote)
+	// Procesamiento Diferido (FSM Antirrebote)
 	if (joystick_izquierdo.HayPulsacionValida()){
-	    // Encender-Apagar Led
+	    //! Registro de Evento discreto
+		Logger::logINFO("Pulsador izq accionado. Conmutando LED de estado.");
 		HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1);
 	}
 
 	// Procesar comandos seriales entrantes si existen
 	terminal.update();
 
-	// Temporizacion por software de la comunicacion
+	// Temporizacion por software de la comunicacion (Telemetria Periodica)
 	uint32_t tiempo_actual = HAL_GetTick();
     if ((tiempo_actual - tiempo_ultimo_envio_uart) >= 1000) {
     	tiempo_ultimo_envio_uart = tiempo_actual;
@@ -112,11 +108,25 @@ void Cpp_Main_Loop(void) {
     	float j1y = joystick_izquierdo.ObtenerY();
     	float angleS1 = servo_base.getAngleDegrees();
 
-    	char mensaje_local[100];
-    	sprintf(mensaje_local, "RAW_X:%lu | RAW_Y:%lu | J1X:%.2f | J1Y:%.2f | S1:%.2f\r\n",
-    	        buffer_global_adc[0], buffer_global_adc[1], j1x, j1y, angleS1);
+    	// Optimización sin FPU: Separación de enteros y decimales para evitar el uso de %f
+    	// Se extrae la magnitud entera (truncamiento)
+    	int j1x_int = static_cast<int>(j1x);
+    	// Se extrae la magnitud fraccionaria de 2 dígitos sin importar el signo original
+    	int j1x_frac = static_cast<int>((j1x < 0.0f ? -j1x : j1x) * 100.0f) % 100;
 
-    	terminal.enviarMensaje(mensaje_local);
+    	int j1y_int = static_cast<int>(j1y);
+    	int j1y_frac = static_cast<int>((j1y < 0.0f ? -j1y : j1y) * 100.0f) % 100;
+
+    	int aS1_int = static_cast<int>(angleS1);
+    	int aS1_frac = static_cast<int>((angleS1 < 0.0f ? -angleS1 : angleS1) * 100.0f) % 100;
+
+    	// Despacho de telemetría a través del Logger optimizado utilizando %d en lugar de %f
+    	// El Logger inyectará automáticamente el SysTick de hardware en el prefijo.
+    	Logger::logDEBUG("RAW_X:%lu | RAW_Y:%lu | J1X:%d.%02d | J1Y:%d.%02d | S1:%d.%02d",
+    			buffer_global_adc[0], buffer_global_adc[1],
+				j1x_int, j1x_frac,
+				j1y_int, j1y_frac,
+				aS1_int, aS1_frac);
     }
 }
 
@@ -134,9 +144,9 @@ extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
 // Callback de las Interrupciones Externas de Pines (Boton Joystick)
 extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-	// Veo que pin activo la interrupcion (estan multiplexados)
-	pin_interrupcion = GPIO_Pin;
-	bandera_boton = 1;
+	joystick_izquierdo.NotificarInterrupcion(GPIO_Pin);
+
+	//joystick_derecho.NotificarInterrupcion(GPIO_Pin);
 }
 
 extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {

@@ -1,0 +1,6 @@
+../App/Src/Logger.cpp:15:6:static void Logger::init(TerminalSerial*, LogLevel)	16	static
+../App/Src/Logger.cpp:20:6:static void Logger::setNivel(LogLevel)	16	static
+../App/Src/Logger.cpp:24:6:static void Logger::formatearYEnviar(LogLevel, const char*, va_list)	48	static
+../App/Src/Logger.cpp:62:6:)	16	static
+../App/Src/Logger.cpp:69:6:)	16	static
+../App/Src/Logger.cpp:76:6:)	16	static

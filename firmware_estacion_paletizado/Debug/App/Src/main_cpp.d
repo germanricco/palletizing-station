@@ -27,7 +27,8 @@ App/Src/main_cpp.o: ../App/Src/main_cpp.cpp ../App/Inc/main_cpp.hpp \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h \
- ../App/Inc/Servo.hpp ../App/Inc/TerminalSerial.hpp
+ ../App/Inc/Servo.hpp ../App/Inc/TerminalSerial.hpp ../App/Inc/Logger.hpp \
+ ../App/Inc/TerminalSerial.hpp
 ../App/Inc/main_cpp.hpp:
 ../App/Inc/Joystick.hpp:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h:
@@ -58,4 +59,6 @@ App/Src/main_cpp.o: ../App/Src/main_cpp.cpp ../App/Inc/main_cpp.hpp \
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h:
 ../App/Inc/Servo.hpp:
+../App/Inc/TerminalSerial.hpp:
+../App/Inc/Logger.hpp:
 ../App/Inc/TerminalSerial.hpp:
