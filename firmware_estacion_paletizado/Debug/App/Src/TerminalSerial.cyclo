@@ -1,0 +1,6 @@
+../App/Src/TerminalSerial.cpp:6:1:TerminalSerial::TerminalSerial(UART_HandleTypeDef*)	1
+../App/Src/TerminalSerial.cpp:12:6:void TerminalSerial::init()	1
+../App/Src/TerminalSerial.cpp:17:6:void TerminalSerial::update()	2
+../App/Src/TerminalSerial.cpp:29:6:bool TerminalSerial::enviarMensaje(const char*)	2
+../App/Src/TerminalSerial.cpp:45:6:void TerminalSerial::analizarComando()	1
+../App/Src/TerminalSerial.cpp:59:6:void TerminalSerial::interrupcionRecepcionByte()	4
