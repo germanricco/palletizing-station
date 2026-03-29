@@ -1,4 +1,5 @@
 #include "main_cpp.hpp"
+#include "Config.hpp"
 #include "Joystick.hpp"
 #include "Servo.hpp"
 #include "TerminalSerial.hpp"
@@ -8,27 +9,27 @@
 #include <cstdio>
 #include <cstring>
 
-// Importación de las estructuras de hardware generadas por STM32CubeMX en main.c
 extern "C" {
     extern ADC_HandleTypeDef hadc1;
     extern TIM_HandleTypeDef htim3;			// Dedicado al lazo cinetico (50Hz)
-    //extern TIM_HandleTypeDef htim4;
     extern UART_HandleTypeDef huart1;
 }
 
 // Arreglo global llenado por DMA
 volatile uint32_t buffer_global_adc[4];
 
-
 Joystick joystick_izquierdo(&buffer_global_adc[0], &buffer_global_adc[1],
 		GPIOB, GPIO_PIN_5,
-		1920.0f, 1960.0f, 0.05f);
-//Joystick joystick_derecho(&buffer_global_adc[2], &buffer_global_adc[3], GPIOB, GPIO_PIN_6)
+		Config::JOYSTICK_IZQUIERDO_X_CENTER,
+		Config::JOYSTICK_IZQUIERDO_Y_CENTER,
+		Config::JOYSTICK_DEADZONE);
 
+Servo servo_base(&TIM3->CCR1,
+		Config::SERVO_BASE_MIN_ANGLE,
+		Config::SERVO_BASE_MAX_ANGLE,
+		Config::SERVO_BASE_HOME_ANGLE,
+		Config::SERVO_BASE_MAX_SPEED);
 
-//MIN_ANGLE, MAX_ANGLE, HOME_ANGLE, MAX_VELOCITY
-Servo servo_base(&TIM3->CCR1, 0.0f, 180.0f, 90.0f, 30.0f);
-//Servo servo_hombro(&TIM3->CCR2, 0.0f, 180.0f, 90.0f, 40.0f);
 
 TerminalSerial terminal(&huart1);
 
@@ -37,35 +38,33 @@ uint32_t tiempo_ultimo_envio_uart = 0;
 
 
 void Cpp_Main_Init(void) {
+	// Inicia interrupcion de recepcion de la terminal
+	terminal.init();
+
+	// Inicializacion de Logger utilizando terminal para envio de datos mediante DMA
+	Logger::init(&terminal, Config::DEFAULT_LOG_LEVEL);
+	Logger::logINFO("Inicializando sistema ...");
+
 	// Inicia el escaneo DMA de ADC1 para los 2 canales simultaneamente
 	HAL_ADC_Start_DMA(&hadc1, (uint32_t*)buffer_global_adc, 4);
-
-	//? Inyeccion de bajo nivel para apagar interrupciones fantasmas del DMA
 	__HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC | DMA_IT_HT | DMA_IT_TE);
 
-	// Inicia Servo base
+	// Inicializacion de Servos
 	servo_base.init();
-	HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-
-	// Inicia Servo hombro
 	//servo_hombro.init();
-	//HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
-
-	// Inicia Servo muneca
 	//servo_muneca.init();
+
+	// Inicializacion de PWM
+	HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+	//HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
 	//HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
 
-    // Inicia el temporizador TIM3 habilitando sus interrupciones de hardware
     HAL_TIM_Base_Start_IT(&htim3);
 
-    // Inicia interrupcion de recepcion de la terminal
-    terminal.init();
-
-    // Inicializacion de Logger utilizando terminal para envio de datos mediante DMA
-    Logger::init(&terminal, LogLevel::Debug);
-
-    // Inicializa el temporizador global
+    // Inicializar el temporizador global
     tiempo_ultimo_envio_uart = HAL_GetTick();
+
+    HAL_Delay(2000);
 }
 
 

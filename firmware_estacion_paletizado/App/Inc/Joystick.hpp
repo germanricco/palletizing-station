@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include "stm32f1xx_hal.h"
+#include "Config.hpp"
 
 class Joystick {
 private:
@@ -34,7 +35,7 @@ private:
 
 
 	// Constantes de operacion
-	static constexpr float ADC_MAX_VALOR = 4095.0f;
+	static constexpr float ADC_MAX_VALOR = Config::ADC_MAX_RESOLUTION;
 	static constexpr uint32_t RETARDO_ANTIRREBOTE_MS = 50;
 
 	// Filtro EMA y Discretizacion

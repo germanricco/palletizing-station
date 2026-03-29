@@ -5,6 +5,7 @@
 
 #include "Joystick.hpp"
 
+
 Joystick::Joystick(volatile uint32_t* direccion_memoria_x, volatile uint32_t* direccion_memoria_y,
 		GPIO_TypeDef* puerto_sw_asignado, uint16_t pin_sw_asignado,
 		float calibracion_centro_x, float calibracion_centro_y, float umbral_zona_muerta)
@@ -14,8 +15,9 @@ Joystick::Joystick(volatile uint32_t* direccion_memoria_x, volatile uint32_t* di
 	  centro_x(calibracion_centro_x), centro_y(calibracion_centro_y),
 	  zona_muerta(umbral_zona_muerta),
 	  tiempo_inicio_debounce(0), en_proceso_debounce(false),
-	  _alpha(0.8), _estado_filtrado_x(0.0f), _estado_filtrado_y(0.0f),
-	  _niveles_resolucion(10.0f) {
+	  _alpha(Config::JOYSTICK_EMA_ALPHA),
+	  _estado_filtrado_x(0.0f), _estado_filtrado_y(0.0f),
+	  _niveles_resolucion(Config::JOYSTICK_RESOLUTION_STEPS) {
 
 	// Ejecucion del pre-calculo para evitar divisiones en tiempo de ejecucion
 	CalcularMultiplicadores();
