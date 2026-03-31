@@ -10,3 +10,16 @@ __pycache__/
 # Configuraciones de IDE (Opcional)
 .vscode/
 .idea/
+
+# STM32CubeIDE / Eclipse
+.settings/
+.metadata/
+*.prefs
+
+# Build
+Debug/
+Release/
+
+# Archivos temporales
+*.log
+*.tmp
