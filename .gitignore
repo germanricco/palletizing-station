@@ -10,3 +10,9 @@ __pycache__/
 # Configuraciones de IDE (Opcional)
 .vscode/
 .idea/
+
+# Archivos de log
+logs/
+
+# Archivos de Trajectory Repository
+trajectories/
