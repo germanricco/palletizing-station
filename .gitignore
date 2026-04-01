@@ -23,3 +23,9 @@ Release/
 # Archivos temporales
 *.log
 *.tmp
+
+# Archivos de log
+logs/
+
+# Archivos de Trajectory Repository
+trajectories/
