@@ -58,6 +58,25 @@ public:
      * @note Se ejecuta en contexto de interrupción (ISR). Tiempo de ejecución estricto O(1).
      */
     void interrupcionRecepcionByte();
+
+
+    /**
+    * @brief Indica si existe una línea completa recibida y aún no consumida.
+    */
+    bool hayComandoPendiente() const;
+
+
+    /**
+    * @brief Devuelve el buffer interno con el último comando completo.
+    * @note El puntero sigue siendo válido hasta llamar a limpiarComandoPendiente().
+    */
+    const char* obtenerComandoPendiente() const;
+
+
+    /**
+    * @brief Limpia el comando actual y rearma la recepción para una nueva línea.
+    */
+    void limpiarComandoPendiente();
 };
 
 #endif /* TERMINALSERIAL_HPP */

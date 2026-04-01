@@ -18,11 +18,11 @@ void TerminalSerial::update() {
     if (_comandoListo) {
         analizarComando();
 
-        memset(_rxBuffer, 0, RX_BUFFER_SIZE);
-        _rxIndex = 0;
-        _comandoListo = false;
+        //memset(_rxBuffer, 0, RX_BUFFER_SIZE);
+        //_rxIndex = 0;
+        //_comandoListo = false;
 
-        HAL_UART_Receive_IT(_huart, &_rxByte, 1);
+        //HAL_UART_Receive_IT(_huart, &_rxByte, 1);
     }
 }
 
@@ -72,3 +72,19 @@ void TerminalSerial::interrupcionRecepcionByte() {
         HAL_UART_Receive_IT(_huart, &_rxByte, 1);
     }
 }
+
+bool TerminalSerial::hayComandoPendiente() const {
+        return _comandoListo;
+    }
+
+const char* TerminalSerial::obtenerComandoPendiente() const {
+        return _rxBuffer;
+    }
+
+void TerminalSerial::limpiarComandoPendiente() {
+        memset(_rxBuffer, 0, RX_BUFFER_SIZE);
+        _rxIndex = 0;
+        _comandoListo = false;
+        HAL_UART_Receive_IT(_huart, &_rxByte, 1);
+    }
+
