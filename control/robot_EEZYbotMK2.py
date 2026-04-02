@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple, Union, Optional
+from typing import Tuple, Optional
 import logging
 
 class RoboticArmMK2:
@@ -61,7 +61,6 @@ class RoboticArmMK2:
         q3_max_deg = (-0.7165 * q2_deg) - 13.144
         return np.deg2rad(q3_min_deg), np.deg2rad(q3_max_deg)   
 
-
     def update_state(self, q1_rad: float, q2_rad: float, q3_rad: float) -> None:
         """
         Actualiza el estado interno.
@@ -86,7 +85,6 @@ class RoboticArmMK2:
 
         self._update_internal_state(q_safe)
 
-
     def _update_internal_state(self, q_vector: np.ndarray) -> None:
         """
         Actualiza la variable de estado y recalcula la cache de coordenadas cartesianas.
@@ -95,7 +93,6 @@ class RoboticArmMK2:
         # Se invoca la cinematica directa expandiendo las dimensiones a (1, 3)
         self.cartesian_state = self.forward_kinematics(self.q[np.newaxis, :])
 
-    
     #
     #   CINEMATICA TENSORIZADA PARA GENERACION DE TRAYECTORIAS
     #
@@ -131,7 +128,6 @@ class RoboticArmMK2:
         
         T[:, 3, 3] = 1.0
         return T
-
 
     def forward_kinematics(self, q_matrix: np.ndarray) -> np.ndarray:
         """
