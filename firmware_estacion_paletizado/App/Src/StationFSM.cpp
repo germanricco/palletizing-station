@@ -95,7 +95,7 @@ CommandResult FSM::makeAck(const char* ackText) {
     CommandResult result{};
     result.handled = true;
     result.success = true;
-    std::snprintf(result.response, sizeof(result.response), "%s\n", ackText);
+    std::snprintf(result.response, sizeof(result.response), "%s\r\n", ackText);
     return result;
 }
 
@@ -103,7 +103,7 @@ CommandResult FSM::makeErr(const char* errText) {
     CommandResult result{};
     result.handled = true;
     result.success = false;
-    std::snprintf(result.response, sizeof(result.response), "%s\n", errText);
+    std::snprintf(result.response, sizeof(result.response), "%s\r\n", errText);
     return result;
 }
 

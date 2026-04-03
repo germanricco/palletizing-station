@@ -71,7 +71,7 @@ static void enviarTelemetria(void) {
     const int a2 = 0;            // TODO: integrar solenoide
 
     std::snprintf(msg, sizeof(msg),
-                  "T:%.2f,%.2f,%.2f,%d,%d\n",
+                  "T:%.2f,%.2f,%.2f,%d,%d\r\n",
                   j1_rad, j2_rad, j3_rad, a1, a2);
 
     terminal.enviarMensaje(msg);
@@ -80,7 +80,7 @@ static void enviarTelemetria(void) {
 static void enviarEstadoActualPorUart(void) {
     char msg[96];
     std::snprintf(msg, sizeof(msg),
-                  "EVT:STATE,%s,%s\n",
+                  "EVT:STATE,%s,%s\r\n",
                   stationFsm.getStateName(),
                   Station::toString(stationFsm.getPreviousState()));
     terminal.enviarMensaje(msg);
@@ -149,7 +149,7 @@ static void onEnterAutoPaused(void) {
 static void onEnterFault(void) {
     Logger::logERROR("FSM -> Fault");
     detenerActuadoresManuales();
-    terminal.enviarMensaje("EVT:FAULT\n");
+    terminal.enviarMensaje("EVT:FAULT\r\n");
 }
 
 static void onEnterEmergency(void) {
@@ -160,7 +160,7 @@ static void onEnterEmergency(void) {
      * TODO:
      * Desenergizar realmente motores/actuadores.
      */
-    terminal.enviarMensaje("EVT:EMERGENCY\n");
+    terminal.enviarMensaje("EVT:EMERGENCY\r\n");
 }
 
 /*
@@ -329,7 +329,7 @@ void Cpp_Main_Init(void) {
     tiempo_ultimo_envio_telemetria = HAL_GetTick();
 
     terminal.enviarMensaje(
-        "PROTO: M100 M101 M110 M111 M112 M113 M114 M99 M00 STATUS\n");
+        "PROTO: M100 M101 M110 M111 M112 M113 M114 M99 M00 STATUS\r\n");
 }
 
 void Cpp_Main_Loop(void) {
