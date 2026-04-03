@@ -1,20 +1,20 @@
+import logging
 import numpy as np
 from typing import Optional
-from interfaces.communication import ICommunication
+from enum import Enum
 
-import logging
 
-class StreamState:
-    IDLE = "IDLE"
-    WAITING_ACK = "WAITING_ACK"
-    STREAMING = "STREAMING"
+class StreamState(Enum):
+    IDLE = 0
+    WAITING_ACK = 1
+    STREAMING = 2
 
 class TrajectoryStreamer:
     """
     Orquesta el envío segmentado de una matriz de trayectoria usando NumPy.
     Implementa el protocolo de Handshake estricto con el microcontrolador.
     """
-    def __init__(self, comm: ICommunication, chunk_size: int = 15):
+    def __init__(self, comm, chunk_size: int = 15):
         self.comm = comm
         self.chunk_size = chunk_size
         self.state = StreamState.IDLE
@@ -22,9 +22,6 @@ class TrajectoryStreamer:
         self.trajectory: Optional[np.ndarray] = None
         self.current_index = 0
         self.total_points = 0
-        
-        # Suscribirse a los mensajes entrantes de la capa de comunicación
-        self.comm.set_rx_callback(self._on_message_received)
 
         # Logger
         self.logger = logging.getLogger("STM32_Controller.TrajectoryStreamer")
@@ -52,12 +49,13 @@ class TrajectoryStreamer:
         self.logger.debug(f"Enviando 'M112' para iniciar handshake. Total puntos a transmitir: {self.total_points}.")
         self.comm.send_message("M112")
 
-    def _on_message_received(self, msg: str) -> None:
+    
+    def process_message(self, msg: str) -> None:
         """
-        Callback invocado por el hilo de RX del UART.
-        Actúa como la Máquina de Estados reactiva del streaming.
+        Método público expuesto para el ruteo de dependencias.
+        El RobotController invocará este método exclusivamente cuando detecte 
+        un mensaje pertinente al flujo de streaming (ej. ACK_M112 o REQ_CHUNK).
         """
-        # Maquina de estados interna para manejar el protocolo de handshake y streaming
         if self.state == StreamState.WAITING_ACK and msg == "ACK_M112":
             self.logger.debug("'ACK_M112' recibido. Iniciando transmisión del primer chunk.")
             self.state = StreamState.STREAMING
@@ -67,12 +65,32 @@ class TrajectoryStreamer:
             self.logger.debug("'REQ_CHUNK' recibido. Enviando siguiente chunk.")
             self._send_next_chunk()
 
+    
+    def reset(self) -> None:
+        """
+        Restablece la maquina de estados a IDLE y purga de forma segura todos
+        los punteros y matrices auxiliares.
+        """
+
+        if self.state != StreamState.IDLE:
+            self.logger.debug("Reiniciando estado de Streamer a IDLE.")
+            self.state = StreamState.IDLE
+        
+        # Limpieza exhaustiva de variables internas
+        self.trajectory = None
+        self.total_points = 0
+        self.current_index = 0
+        self.logger.debug("Cache de trayectoria del Streamer purgada.")
+
+
     def _send_next_chunk(self) -> None:
-        """Extrae la siguiente vista de NumPy y la envía."""
+        """
+        Extrae la siguiente vista de NumPy y despacha los comandos secuenciales.
+        Maneja automaticamente el evento de fin de trayectoria.
+        """
         if self.current_index >= self.total_points:
             self.logger.info("Todos los puntos transmitidos. Enviando 'M113' para finalizar.")
             self.comm.send_message("M113")
-            # Reset del estado
             self.state = StreamState.IDLE
             return
 
