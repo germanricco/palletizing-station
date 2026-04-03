@@ -22,17 +22,18 @@ static void normalizeToUpperNoSpaces(const char* src, char* dst, uint16_t dstSiz
 
 const char* toString(UartCommand command) {
     switch (command) {
-        case UartCommand::None:    return "None";
-        case UartCommand::Manual:  return "Manual";
-        case UartCommand::Auto:    return "Auto";
-        case UartCommand::Stop:    return "Stop";
-        case UartCommand::Pause:   return "Pause";
-        case UartCommand::Resume:  return "Resume";
-        case UartCommand::Reset:   return "Reset";
-        case UartCommand::EStop:   return "EStop";
-        case UartCommand::Home:    return "Home";
-        case UartCommand::Status:  return "Status";
-        default:                   return "Unknown";
+        case UartCommand::None:                   return "None";
+        case UartCommand::M100_ManualMode:        return "M100";
+        case UartCommand::M101_AutoMode:          return "M101";
+        case UartCommand::M110_StartRecording:    return "M110";
+        case UartCommand::M111_StopRecording:     return "M111";
+        case UartCommand::M112_StartPlayback:     return "M112";
+        case UartCommand::M113_StopPausePlayback: return "M113";
+        case UartCommand::M114_ResumePlayback:    return "M114";
+        case UartCommand::M99_GoIdle:             return "M99";
+        case UartCommand::M00_EStop:              return "M00";
+        case UartCommand::Status:                 return "STATUS";
+        default:                                  return "Unknown";
     }
 }
 
@@ -40,40 +41,42 @@ UartCommand parseUartCommand(const char* text) {
     char cmd[32] = {0};
     normalizeToUpperNoSpaces(text, cmd, sizeof(cmd));
 
-    if (std::strcmp(cmd, "MANUAL") == 0) {
-        return UartCommand::Manual;
+    if (cmd[0] == '\0') {
+        return UartCommand::None;
     }
-    if (std::strcmp(cmd, "AUTO") == 0) {
-        return UartCommand::Auto;
+
+    if (std::strcmp(cmd, "M100") == 0) {
+        return UartCommand::M100_ManualMode;
     }
-    if (std::strcmp(cmd, "STOP") == 0) {
-        return UartCommand::Stop;
+    if (std::strcmp(cmd, "M101") == 0) {
+        return UartCommand::M101_AutoMode;
     }
-    if (std::strcmp(cmd, "PAUSE") == 0) {
-        return UartCommand::Pause;
+    if (std::strcmp(cmd, "M110") == 0) {
+        return UartCommand::M110_StartRecording;
     }
-    if (std::strcmp(cmd, "RESUME") == 0) {
-        return UartCommand::Resume;
+    if (std::strcmp(cmd, "M111") == 0) {
+        return UartCommand::M111_StopRecording;
     }
-    if (std::strcmp(cmd, "RESET") == 0) {
-        return UartCommand::Reset;
+    if (std::strcmp(cmd, "M112") == 0) {
+        return UartCommand::M112_StartPlayback;
     }
-    if (std::strcmp(cmd, "ESTOP") == 0) {
-        return UartCommand::EStop;
+    if (std::strcmp(cmd, "M113") == 0) {
+        return UartCommand::M113_StopPausePlayback;
     }
-    if (std::strcmp(cmd, "HOME") == 0) {
-        return UartCommand::Home;
+    if (std::strcmp(cmd, "M114") == 0) {
+        return UartCommand::M114_ResumePlayback;
+    }
+    if (std::strcmp(cmd, "M99") == 0) {
+        return UartCommand::M99_GoIdle;
+    }
+    if (std::strcmp(cmd, "M00") == 0) {
+        return UartCommand::M00_EStop;
     }
     if (std::strcmp(cmd, "STATUS") == 0) {
         return UartCommand::Status;
-    }
-
-    if (cmd[0] == '\0') {
-        return UartCommand::None;
     }
 
     return UartCommand::Unknown;
 }
 
 } // namespace Station
-

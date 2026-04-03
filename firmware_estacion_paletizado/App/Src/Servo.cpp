@@ -44,7 +44,7 @@ void Servo::goHome(){
 	_currentCCR = static_cast<float>(_homePulse);
 
 	if (_ccr_reg != nullptr) {
-	    *_ccr_reg = _homePulse;
+	    *_ccr_reg = _homePulse; //AGREGAR VELOCIDAD 10 o 20 PULSOS, QUE NO SEA A LA VELOCIDAD
 	}
 }
 
