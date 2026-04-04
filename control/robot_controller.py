@@ -1,4 +1,5 @@
 import logging
+import threading
 import os
 import time
 import numpy as np
@@ -81,9 +82,13 @@ class RobotController:
             'pump': False
         }
 
-        # Callback de UI.
-        #! ACTUALIZAR FIRMA DE CALLBACK
         self.ui_update_callback = None
+
+        # Variables para simulacion
+        self.active_trajectory = None
+        self._is_simulating = False
+        self._simulation_thread = None
+
 
         self.logger.info("RobotController ensamblado con exito. Estado actual: {self.current_state.value}.")
     
@@ -147,6 +152,10 @@ class RobotController:
             q1, q2, q3 = float(partes[0]), float(partes[1]), float(partes[2])
             a1_valve, a2_pump = bool(int(partes[3])), bool(int(partes[4]))
 
+            # Si estamos simulando, descartamos la realidad física para no generar "flickering" visual
+            if self._is_simulating:
+                return
+            
             # Actualizar estado de Digital Twin
             self.digital_twin.update_state(q1, q2, q3)
 
@@ -429,11 +438,96 @@ class RobotController:
         #! PARA QUE SE RENDERICE LA TRAYECTORIA PROYECTADA EN ROJO
         return True
 
+    def simulate_trajectory(self) -> bool:
+        """Inicia el recorrido virtual de la trayectoria en la memoria."""
+        if self.current_state != SystemState.AUTO_READY:
+            self.logger.warning("Simulación denegada: El sistema no está en AUTO_READY.")
+            return False
+
+        if getattr(self, 'active_trajectory', None) is None or self.active_trajectory.size == 0:
+            self.logger.warning("Simulación denegada: No hay trayectoria cargada.")
+            return False
+
+        # Si ya hay una simulación corriendo, la reiniciamos
+        if self._is_simulating:
+            self._is_simulating = False
+            if self._simulation_thread:
+                self._simulation_thread.join(timeout=0.5)
+
+        self.logger.info("Iniciando previsualización del Gemelo Digital...")
+        self._is_simulating = True
+        self._simulation_thread = threading.Thread(target=self._simulation_worker, daemon=True)
+        self._simulation_thread.start()
+        return True
+
+    def _simulation_worker(self) -> None:
+        """Hilo dedicado a iterar la matriz sin bloquear el orquestador."""
+        try:
+            total_points = len(self.active_trajectory)
+            # Asumimos que los datos se grabaron a 50Hz (0.02 segundos por punto)
+            dt = 0.02 
+
+            for i, point in enumerate(self.active_trajectory):
+                # Permite abortar la simulación a la mitad si el usuario hace clic en Ejecutar o cambia de modo
+                if not self._is_simulating:
+                    break
+
+                q1, q2, q3 = point[0], point[1], point[2]
+                valve, pump = bool(point[3]), bool(point[4])
+
+                # Asegura que siempre envie al menos 1% de progreso
+                progress = max(1, int(((i + 1) / total_points) * 100))
+
+                self.digital_twin.update_state(q1, q2, q3)
+
+                # Notificamos a la UI inyectando las posiciones simuladas
+                if self.ui_update_callback:
+                    self.ui_update_callback(
+                        self.digital_twin.get_cartesian_state(),
+                        [q1, q2, q3],
+                        self.current_state,
+                        {'valve': valve, 'pump': pump},
+                        progress
+                    )     
+                # Simulamos el paso del tiempo de la grabación
+                time.sleep(dt)
+
+            self.logger.info("Previsualización finalizada.")
+        
+        except Exception as e:
+            self.logger.error(f"Error durante simulación: {e}")
+        
+        finally:
+            # Apagamos el flag. En los próximos 20 milisegundos, la telemetría viva del 
+            # hardware volverá a entrar, el brazo "saltará" a la realidad, indicando 
+            # visualmente que la simulación terminó.
+            self._is_simulating = False
+
     
+    def stop_simulation(self):
+        """Detiene el hilo de simulación y limpia la UI."""
+        self._is_simulating = False
+        self.logger.info("Simulación detenida por el usuario.")
+        # Enviamos un último callback con progreso 0 para limpiar la barra en la UI
+        if self.ui_update_callback:
+            self.ui_update_callback(
+                self.digital_twin.get_cartesian_state(),
+                self.digital_twin.get_joint_state(), # asumiendo que tienes este getter
+                self.current_state,
+                self.actuator_state,
+                0 # Reset progreso
+            )
+
+
     def execute_auto(self) -> bool:
         """
         Delega la ejecución de la matriz cacheada al TrajectoryStreamer.
         """
+        if self._is_simulating:
+            self.logger.info("Abortando simulación para iniciar ejecución real.")
+            self._is_simulating = False
+            time.sleep(0.05) # Pequeño margen para que muera el hilo
+
         if self.current_state != SystemState.AUTO_READY:
             self.logger.warning(f"Ejecucion denegada. Incompatibilidad de estado.")
             return False

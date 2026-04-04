@@ -28,7 +28,7 @@ class SignalBridge(QObject):
     # * list: Lista de telemetria con angulos articulares
     # * object: Objeto con el estado del sistema
     # * dict: Objeto con el estado de actuadores
-    telemetry_received = Signal(np.ndarray, list, object, dict)
+    telemetry_received = Signal(np.ndarray, list, object, dict, int)
 
 
 
@@ -51,8 +51,11 @@ class RobotGUIApp:
 
         # Variables para Throttling
         self._last_telemetry_time = 0.0
-        # 20FPS es ideal
-        self._ui_refresh_rate = 1.0 / 20.0
+        self._ui_refresh_rate = 1.0 / 20.0  # 20FPS es ideal
+
+        # Memoria de Estados Criticos
+        self._last_state_name = ""
+        self._last_progress = -1
         
         self._apply_styles()
         self._setup_connections()
@@ -86,17 +89,53 @@ class RobotGUIApp:
             self.controller.send_manual_command
         )
 
-    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict) -> None:
+        # Conexiones de cambio de Modo
+        panel = self.window.control_panel_widget
+
+        # Conexiones de Modos
+        panel.request_mode_idle.connect(self.controller.request_idle_state)
+        panel.request_mode_manual.connect(self.controller.request_manual_mode)
+        panel.request_mode_auto.connect(self.controller.request_auto_ready)
+
+        # Conexiones de Memoria
+        panel.request_start_recording.connect(self.controller.start_recording)
+        panel.request_stop_recording.connect(self.controller.stop_recording)
+        panel.request_load_trajectory.connect(self.controller.load_trajectory)
+        
+        # Conexiones de ejecucion de trayectoria
+        panel.request_execute_auto.connect(self.controller.execute_auto)
+        panel.request_simulate_trajectory.connect(self.controller.simulate_trajectory)
+        panel.request_stop_simulation.connect(self.controller.stop_simulation)
+        panel.request_pause_trajectory.connect(self.controller.stop_trajectory)
+        panel.request_resume_trajectory.connect(self.controller.resume_trajectory)
+        panel.request_cancel_trajectory.connect(self.controller.cancel_trajectory)
+
+    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict, progress=0) -> None:
         """
         ATENCIÓN: Este método es llamado por el hilo RX del AsyncUARTCommunicator.
         Su única responsabilidad es emitir la señal para cruzar al hilo principal.
         """
         now = time.time()
         
-        # Solo emitimos la señal a la GUI si ha pasado el tiempo de refresco estipulado
-        if (now - self._last_telemetry_time) >= self._ui_refresh_rate:
-            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state)
+        state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
+        
+        # 1. EVALUACIÓN DE BYPASS CRÍTICO
+        # ¿El estado general cambió? ¿O el progreso saltó a 0 (abortado) o a 1 (iniciado)?
+        is_critical_change = (
+            (state_name != self._last_state_name) or 
+            (progress == 0 and self._last_progress > 0) or 
+            (progress == 1 and self._last_progress == 0)
+        )
+        
+        # 2. PUERTA LÓGICA
+        # Pasa si es urgente (bypass) O si ya pasó el tiempo de refresco (throttling normal)
+        if is_critical_change or (now - self._last_telemetry_time) >= self._ui_refresh_rate:
+            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state, progress)
+            
+            # Actualizamos la memoria
             self._last_telemetry_time = now
+            self._last_state_name = state_name
+            self._last_progress = progress
 
     def run(self) -> None:
         """
