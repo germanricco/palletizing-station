@@ -1,71 +1,80 @@
-import numpy as np
+#!/usr/bin/env python3
+"""
+Punto de entrada principal de la aplicación.
+Ensambla el controlador del hardware con la interfaz gráfica de usuario.
+"""
+
+import sys
 import logging
-import time
-from communication.fake_uart import FakeUARTCommunicator
-from control.trajectory_streamer import TrajectoryStreamer
+from PySide6.QtWidgets import QApplication
 
-from utils.system_logger import SystemLogger
-from utils.trajectory_repository import TrajectoryRepository
+# Importaciones de los módulos del proyecto
+from control.robot_controller import RobotController
+from utils.qt_log_handler import QtLogHandler
+from app.RobotGUIApp import RobotGUIApp  # Tu archivo modificado arriba
 
-# FUNCION PARA GENERAR TRAYECTORIA DE PRUEBA
-def generar_trayectoria_dummy(num_puntos: int) -> np.ndarray:
-    """Genera una trayectoria senoidal de prueba de Nx3."""
-    t = np.linspace(0, 10, num_puntos)
-    q1 = np.sin(t) * 90      # Articulación base
-    q2 = np.cos(t) * 45      # Hombro
-    q3 = np.sin(t * 0.5) * 30 # Codos
-    return np.column_stack((q1, q2, q3))
+def graceful_shutdown(controller: RobotController) -> None:
+    """
+    Rutina de cierre seguro disparada cuando la ventana principal se destruye.
+    Asegura que el microcontrolador detenga los motores y se libere el puerto COM.
+    """
+    logging.info("Señal de cierre detectada. Ejecutando Graceful Shutdown...")
+    try:
+        # Forzamos la detención inmediata de cualquier cinemática en curso
+        controller.trigger_emergency_stop()
+        # Desconectamos los hilos de RX/TX y cerramos el puerto serial
+        if hasattr(controller, 'uart'):
+            controller.uart.disconnect()
+        logging.info("Hardware asegurado exitosamente. Saliendo...")
+
+    except Exception as e:
+        logging.error(f"Fallo durante la secuencia de cierre: {e}")
 
 def main():
-    # 1. Ejecución única para configurar la raíz del logging.
-    SystemLogger(log_dir="logs", log_level=logging.DEBUG)
+    # 1. Inicializar la aplicación Qt
+    app = QApplication(sys.argv)
+
+    # Configuracion de Logging centralizada
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] | [%(levelname)s] | [%(module)s] | %(message)s",
+        datefmt="%H:%M:%S"
+    )
+
+    # 2. Configurar el puente de Qt y añadirlo al root logger
+    qt_logger = QtLogHandler()
+    qt_logger.setFormatter(logging.Formatter('%(message)s'))
     
-    # 2. Reclamamos el logger para este hilo de orquestación
-    logger = logging.getLogger("STM32_Controller.Main")
+    # Interceptamos todos los logs desde el nivel raíz y los enviamos a Qt
+    root_logger = logging.getLogger()
+    root_logger.addHandler(qt_logger)
 
-    # 3. Instanciamos el Mock de Comunicación (Simulando el STM32)
-    stm32_mock = FakeUARTCommunicator(consumption_rate_hz=50, chunk_size=15)
-    stm32_mock.connect()
+    logging.info("Inicializando Robot Control GUI...")
 
-    # 4. Instanciamos la Lógica de Dominio (El Streamer)
-    streamer = TrajectoryStreamer(comm=stm32_mock, chunk_size=15)
-    
-    logger.info("Iniciando software de control del brazo robótico...")
+    # 3. Instanciar el Controlador de Hardware
+    TARGET_PORT = "/dev/ttyUSB0"  # Adaptar según el SO (ej. COM3 en Windows)
+    BAUD_RATE = 115200
+    robot_controller = RobotController(port=TARGET_PORT, baudrate=BAUD_RATE)
 
-    # El constructor queda limpio, inyección cero.
-    repository = TrajectoryRepository(storage_dir="trajectories")
+    # 4. Instanciar la Interfaz de Usuario
+    gui_app = RobotGUIApp(app, robot_controller)
 
-    # Simulamos la captura
-    trayectoria_capturada = generar_trayectoria_dummy(60)
-    
-    nombre_archivo = "soldadura_prueba_1"
-    logger.info(f"Delegando guardado de la trayectoria: {nombre_archivo}")
-    
-    # Aquí el control pasa a TrajectoryRepository
-    exito = repository.save_trajectory(nombre_archivo, trayectoria_capturada)
-    
-    if exito:
-        logger.info("El flujo de guardado retornó sin errores.")
-    else:
-        logger.error("Fallo crítico reportado por la capa de persistencia.")
+    # 5. Conexión del puente visual
+    # El qt_logger emite de forma segura al LogViewer
+    qt_logger.log_emitted.connect(gui_app.window.logs_widget.append_log)
 
-    logger.info("Solicitando carga de matriz para modo Automático...")
-    matriz_cargada = repository.load_trajectory("soldadura_prueba_1")
-    
-    if matriz_cargada.size > 0:
-        logger.info("Matriz validada en orquestador. Lista para el Streamer.")
-    else:
-        logger.error("Abortando transición a M101 por ausencia de datos.")
+    # 6. Cierre seguroC
+    app.aboutToQuit.connect(lambda: graceful_shutdown(robot_controller))
 
-    logger.info("Iniciando transmisión de trayectoria al STM32...")
-    streamer.start_streaming(matriz_cargada)
+    # 7. Levantar la comunicación física con el hardware
+    logging.info(f"Intentando abrir el canal de comunicación en {TARGET_PORT}...")
+    if not robot_controller.uart.connect():
+        logging.error("Fallo crítico: No se pudo abrir el puerto UART.")
+        # Opcional: Podrías mostrar un QDialog de error aquí antes de abortar, 
+        # o permitir que la UI inicie en un modo 'Offline/Simulación'.
 
-    print("Hilo Principal: Libre para renderizar GUI o leer otras entradas!\n")
-    while streamer.state != "IDLE":
-        time.sleep(0.1)
-
-    logger.info("Transmision terminada")
-    stm32_mock.disconnect()
+    # 8. Desplegar la ventana y entregar el control al Event Loop
+    gui_app.run()
 
 if __name__ == "__main__":
     main()

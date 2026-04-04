@@ -3,13 +3,14 @@ Módulo del componente Visor de Logs.
 Muestra la salida de eventos y errores del sistema con formato semántico y auto-scroll.
 """
 
+import html
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QPlainTextEdit
 )
 from PySide6.QtGui import QTextCursor
-from core.constants import AppConfig
+from app.core.constants import AppConfig
 
 
 class LogViewer(QWidget):
@@ -63,12 +64,17 @@ class LogViewer(QWidget):
         }
         level_color = color_map.get(level.upper(), AppConfig.COLORS.TEXT_HIGH)
 
+        # Limpiar el mensaje para evitar rotura de HTML
+        # Ejemplo: caracter '<' sera tratado como etiqueta HTML y rompera todo.
+        safe_message = html.escape(message)
+        safe_module = html.escape(module)
+
         # Construcción HTML de la línea
         log_line = (
             f"<span style='color:#666666;'>[{timestamp}]</span> | "
             f"<span style='color:{level_color}; font-weight:bold;'>[{level}]</span> | "
-            f"<span style='color:{AppConfig.COLORS.TEXT_MED};'>[{module}]</span> | "
-            f"<span style='color:{AppConfig.COLORS.TEXT_HIGH};'>{message}</span>"
+            f"<span style='color:{AppConfig.COLORS.TEXT_MED};'>[{safe_module}]</span> | "
+            f"<span style='color:{AppConfig.COLORS.TEXT_HIGH};'>{safe_message}</span>"
         )
 
         # Si es un error, el design handoff requiere un fondo especial,

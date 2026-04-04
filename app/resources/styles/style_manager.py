@@ -6,7 +6,7 @@ Permite el uso de variables de diseño procesando plantillas QSS.
 import os
 from typing import Dict, Any
 from PySide6.QtWidgets import QApplication
-from core.constants import AppConfig
+from app.core.constants import AppConfig
 
 class StyleManager:
     """
