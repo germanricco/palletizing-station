@@ -33,6 +33,9 @@ class TerminalUART(QWidget):
         self.history = []
         self.history_index = -1
 
+        # Rastreador de estado interno
+        self._current_enable_state = True
+
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -89,7 +92,7 @@ class TerminalUART(QWidget):
         Filtro para interceptar teclas antes de que QLineEdit las procese.
         """
         if obj == self.input_field and event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_up:
+            if event.key() == Qt.Key.Key_Up:
                 self._navigate_history(-1)
                 return True
             elif event.key() == Qt.Key.Key_Down:
@@ -139,7 +142,15 @@ class TerminalUART(QWidget):
         Args:
             is_enabled (bool): Estado de habilitación deseado.
         """
+        # ¡CRÍTICO! Si el estado que me piden es igual al que ya tengo, no hago nada.
+        if self._current_enable_state == is_enabled:
+            return
+
+        # Si cambió, actualizo mi registro y aplico los cambios pesados
+        self._current_enable_state = is_enabled
+        
         self.input_field.setEnabled(is_enabled)
         self.btn_send.setEnabled(is_enabled)
-        # Varia la opacidad del componente dependiendo si esta o no habilitado
-        self.setStyleSheet(f"opacity: {'1.0' if is_enabled else '0.5'};")
+        
+        opacity = "1.0" if is_enabled else "0.5"
+        self.setStyleSheet(f"opacity: {opacity};")

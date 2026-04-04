@@ -26,8 +26,8 @@ class RoboticArmMK2:
         self.singularity_margin_mm = 3.0   # Margen de seguridad para evitar singularidad en frontera
         
         # Limites Fisicos Estaticos (radianes)
-        self.q1_min_rad = np.deg2rad(-30.0)
-        self.q1_max_rad = np.deg2rad(30.0)
+        self.q1_min_rad = np.deg2rad(0.0)
+        self.q1_max_rad = np.deg2rad(180.0)
         self.q2_min_rad = np.deg2rad(39.0)
         self.q2_max_rad = np.deg2rad(120.0)
 

@@ -8,6 +8,7 @@ import sys
 import logging
 import os
 import numpy as np
+import time
 
 from typing import Any
 from PySide6.QtWidgets import QApplication
@@ -47,6 +48,11 @@ class RobotGUIApp:
         # Componentes Visuales y Puente entre senales
         self.window = MainWindow()
         self.bridge = SignalBridge()
+
+        # Variables para Throttling
+        self._last_telemetry_time = 0.0
+        # 20FPS es ideal
+        self._ui_refresh_rate = 1.0 / 20.0
         
         self._apply_styles()
         self._setup_connections()
@@ -85,7 +91,12 @@ class RobotGUIApp:
         ATENCIÓN: Este método es llamado por el hilo RX del AsyncUARTCommunicator.
         Su única responsabilidad es emitir la señal para cruzar al hilo principal.
         """
-        self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state)
+        now = time.time()
+        
+        # Solo emitimos la señal a la GUI si ha pasado el tiempo de refresco estipulado
+        if (now - self._last_telemetry_time) >= self._ui_refresh_rate:
+            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state)
+            self._last_telemetry_time = now
 
     def run(self) -> None:
         """

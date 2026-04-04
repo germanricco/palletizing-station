@@ -71,7 +71,7 @@ bool TerminalSerial::iniciarTx() {
 
 bool TerminalSerial::enviarACK(const char* msg) {
     uint32_t p = enterCritical();
-    enqueue(TxPriority::HIGH, msg);
+    enqueue(TxPriority::NORMAL, msg);
     if (!_txBusy) iniciarTx();
     exitCritical(p);
     return true;

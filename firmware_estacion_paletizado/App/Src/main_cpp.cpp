@@ -68,8 +68,8 @@ static void enviarTelemetria(void) {
     char msg[96];
 
     const float j1_rad = servo_base.getAngleRadians();
-    const float j2_rad = 0.0f;   // TODO: integrar servo 2
-    const float j3_rad = 0.0f;   // TODO: integrar servo 3
+    const float j2_rad = 1.571f;   // TODO: integrar servo 2
+    const float j3_rad = -1.571f;   // TODO: integrar servo 3
     const int a1 = 0;            // TODO: integrar bomba de vacío
     const int a2 = 0;            // TODO: integrar solenoide
 

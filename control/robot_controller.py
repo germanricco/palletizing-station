@@ -263,6 +263,7 @@ class RobotController:
         self.current_state = new_state
         self.logger.info(f"Sistema en modo: {self.current_state.value}.")
 
+        """
         # Notificacion a la Interfaz de Usuario
         if self.ui_update_callback:
             # Se envía el estado cartesiano actual y el nuevo estado de la máquina
@@ -271,6 +272,7 @@ class RobotController:
                 self.current_state,
                 self.actuator_state
             )
+        """
 
 
     # RECIBE UN EVENTO DE ESTADO DEL STM32

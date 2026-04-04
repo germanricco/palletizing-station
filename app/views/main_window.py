@@ -180,7 +180,7 @@ class MainWindow(QMainWindow):
         # 1. Terminal (Bloqueo lógico)
         # Si el sistema está en AUTO_RUNNING, deshabilitamos la inyección manual
         state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
-        is_safe_for_manual = state_name in ["IDLE", "MANUAL", "AUTO_READY"]
+        is_safe_for_manual = state_name in ["IDLE", "MANUAL", "AUTO_READY", "RECORDING"]
         self.terminal_widget.set_enabled_state(is_safe_for_manual)
 
         # 2. Gemelo Digital
