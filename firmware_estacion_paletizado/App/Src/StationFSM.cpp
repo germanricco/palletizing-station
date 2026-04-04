@@ -135,7 +135,7 @@ CommandResult FSM::handleUartLine(const char* rawLine, uint32_t nowMs) {
      */
     if (command == UartCommand::M00_EStop) {
         transitionTo(GlobalState::Emergency, nowMs);
-        return makeErr("ERR:ESTOP");
+        return makeAck("ACK_M00");
     }
 
     if (command == UartCommand::Status) {
