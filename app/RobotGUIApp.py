@@ -6,27 +6,29 @@ y establece los puentes de comunicación segura (Thread-Safe) entre ambos.
 
 import sys
 import logging
-from typing import Any, Dict, Callable
+import os
+import numpy as np
+
+from typing import Any
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QObject, Signal
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 # Importaciones de la vista y estilos
-from views.main_window import MainWindow
-from resources.styles.style_manager import StyleManager
-
-# Importación hipotética del backend
-# from app.core.robot_controller import RobotController
-
+from app.views.main_window import MainWindow
+from app.resources.styles.style_manager import StyleManager
+from control.robot_controller import RobotController, SystemState
 
 class SignalBridge(QObject):
-    """
-    Puente de señales para garantizar la seguridad entre hilos (Thread-Safety).
-    Actúa como intermediario entre los callbacks del backend y los slots de la UI.
-    """
+    """Puente de señales para garantizar la seguridad entre hilos."""
     # Define la firma de los datos que enviará el controlador.
-    # Ejemplo: dict con telemetría, estados, etc.
-    telemetry_received = Signal(dict)
-    log_received = Signal(str, str, str, str)  # timestamp, level, module, message
+    # * np.array: Matriz de telemetria con posiciones cartesiana
+    # * list: Lista de telemetria con angulos articulares
+    # * object: Objeto con el estado del sistema
+    # * dict: Objeto con el estado de actuadores
+    telemetry_received = Signal(np.ndarray, list, object, dict)
+
 
 
 class RobotGUIApp:
@@ -35,42 +37,20 @@ class RobotGUIApp:
     Instancia la UI, el backend y gestiona la inyección de dependencias.
     """
 
-    def __init__(self) -> None:
-        """Inicializa los componentes principales de la arquitectura."""
-        # 1. Framework Qt
-        self.app = QApplication(sys.argv)
+    def __init__(self, app: QApplication, controller) -> None:
+        """
+        Inicializa los componentes principales de la arquitectura.
+        """
+        self.app = app
+        self.controller = controller
         
-        # 2. Componentes de la Arquitectura
+        # Componentes Visuales y Puente entre senales
         self.window = MainWindow()
         self.bridge = SignalBridge()
         
-        # Mock del controlador (En producción: self.controller = RobotController())
-        self.controller = self._init_mock_controller()
-
-        # 3. Inicialización y Enlaces
-        self._setup_logging()
         self._apply_styles()
         self._setup_connections()
 
-    def _init_mock_controller(self) -> Any:
-        """Crea un objeto mock o instancia el controlador real."""
-        class MockController:
-            ui_update_callback: Callable[[Dict[str, Any]], None] | None = None
-            
-            # NUEVO: Callback de logs del backend
-            log_callback: Callable[[str, str, str, str], None] | None = None
-
-            def start(self):
-                logging.info("Controlador de Robot iniciado.")
-
-            def send_manual_command(self, cmd: str) -> None:
-                # Simulación de backend recibiendo un comando
-                logging.info(f"STM32 Rx: {cmd}")
-                if self.log_callback:
-                    # Simulamos una respuesta del microcontrolador
-                    self.log_callback("00:00:00.000", "INFO", "UART", f"Comando enviado: {cmd}")
-
-        return MockController()
 
     def _setup_logging(self) -> None:
         """Configura el formato estándar para los logs de la aplicación."""
@@ -90,37 +70,22 @@ class RobotGUIApp:
         Enlaza los callbacks del backend con las señales de Qt y, a su vez,
         conecta estas señales a los métodos de actualización visual de MainWindow.
         """
-        # =====================================================================
-        # 1. FLUJO: BACKEND -> FRONTEND (Actualizaciones de la UI)
-        # =====================================================================
+        # 1. Telemetria.
+        self.controller.ui_update_callback = self._on_backend_telemetry_update
+        # Conexión directa hacia la actualización central de la MainWindow
+        self.bridge.telemetry_received.connect(self.window.update_dashboard)
 
-        # El backend ejecuta el callback (quizás en otro hilo). Esto simplemente
-        # emite la señal thread-safe de Qt.
-        #self.controller.log_callback = self._on_backend_log_emitted
+        # 2. Comandos Manuales.
+        self.window.terminal_widget.command_submitted.connect(
+            self.controller.send_manual_command
+        )
 
-        # La señal segura se conecta al método visual (corriendo en el hilo principal).
-        #self.bridge.log_received.connect(self.window.append_system_log)
-
-        # =====================================================================
-        # 2. FLUJO: FRONTEND -> BACKEND (Acciones del usuario)
-        # =====================================================================
-        # Conectamos la señal que emite el widget de la terminal directamente 
-        # al método del controlador que procesará el string.
-        # Al ir desde la UI (hilo principal) al backend, es seguro hacer una llamada directa.
-        #self.window.terminal_widget.command_submitted.connect(
-        #    self.controller.send_manual_command
-        #)
-
-    def _on_backend_telemetry_update(self, data: Dict[str, Any]) -> None:
+    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict) -> None:
         """
-        Callback que el RobotController invocará directamente.
-        ATENCIÓN: Este método podría ejecutarse en un hilo secundario.
-        NO interactuar con la UI aquí. Solo emitir la señal.
-        
-        Args:
-            data (Dict[str, Any]): Datos empaquetados provenientes del hardware.
+        ATENCIÓN: Este método es llamado por el hilo RX del AsyncUARTCommunicator.
+        Su única responsabilidad es emitir la señal para cruzar al hilo principal.
         """
-        self.bridge.telemetry_received.emit(data)
+        self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state)
 
     def run(self) -> None:
         """
@@ -128,12 +93,21 @@ class RobotGUIApp:
         """
         try:
             self.window.show()
-            self.controller.start()
+            #! Ver si agrego un inicio al controlador del Robot
+            if hasattr(self.controller, 'start'):
+                self.controller.start()
+
+            elif hasattr(self.controller, 'uart') and not self.controller.uart.serial_conn:
+                # Opcional: Podrías mandar llamar connect() aquí si no lo hiciste en main.py
+                pass
+
         except Exception as e:
             logging.error(f"Fallo crítico al iniciar componentes: {e}")
             sys.exit(1)
         
         sys.exit(self.app.exec())
+
+    
 
 
 if __name__ == "__main__":

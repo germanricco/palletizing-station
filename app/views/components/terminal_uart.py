@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton
 )
-from PySide6.QtCore import Signal, Qt
-from core.constants import AppConfig
+from PySide6.QtCore import Signal, Qt, QEvent
+from app.core.constants import AppConfig
 
 
 class TerminalUART(QWidget):
@@ -28,6 +28,11 @@ class TerminalUART(QWidget):
         """Inicializa el widget de la terminal UART."""
         super().__init__(parent)
         self.setObjectName("TerminalUARTWidget")
+        
+        # Buffer para historial de comandos
+        self.history = []
+        self.history_index = -1
+
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -37,7 +42,7 @@ class TerminalUART(QWidget):
         layout.setSpacing(8)
 
         # Campo de entrada (Input Field) - 80% del ancho
-        self.input_field = QLineEdit()
+        self.input_field = QLineEdit()  # Entrada de texto
         self.input_field.setPlaceholderText("Ingrese comando manual...")
         self.input_field.setFixedHeight(48)
         self.input_field.setStyleSheet(
@@ -48,6 +53,10 @@ class TerminalUART(QWidget):
             f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
             f"font-size: {AppConfig.TYPOGRAPHY.SIZE_HUD_CONSOLE};"
         )
+        
+        # Instalamos un filtro de eventos para capturar flechas direccionales
+        self.input_field.installEventFilter(self)
+        # Se activa al pulsar enter. Conectamos la senal al metodo / slot
         self.input_field.returnPressed.connect(self._on_send_clicked)
 
         # Botón de envío (Send Button) - 20% del ancho
@@ -66,11 +75,48 @@ class TerminalUART(QWidget):
             f"  background-color: #444444;"
             f"}}"
         )
+
+        # Se activa al pulsarse. Conectamos la senal al metodo / slot
         self.btn_send.clicked.connect(self._on_send_clicked)
 
-        # Agregamos al layout con los stretch factors correspondientes (80 / 20)
+        # Agregamos al layout con los stretch factors  (80 / 20)
         layout.addWidget(self.input_field, stretch=80)
         layout.addWidget(self.btn_send, stretch=20)
+
+    
+    def eventFilter(self, obj, event) -> bool:
+        """
+        Filtro para interceptar teclas antes de que QLineEdit las procese.
+        """
+        if obj == self.input_field and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_up:
+                self._navigate_history(-1)
+                return True
+            elif event.key() == Qt.Key.Key_Down:
+                self._navigate_history(1)
+                return True
+        return super().eventFilter(obj, event)
+    
+
+    def _navigate_history(self, direction: int) -> None:
+        """Navega por el historial de comandos tipeados."""
+        if not self.history:
+            return
+
+        self.history_index += direction
+        
+        # Limites del índice
+        if self.history_index < 0:
+            self.history_index = -1
+            self.input_field.clear()
+            return
+        elif self.history_index >= len(self.history):
+            self.history_index = len(self.history) - 1
+
+        # Mostramos el comando historico (invertimos la lista para que el mas reciente sea el índice 0)
+        reversed_history = list(reversed(self.history))
+        self.input_field.setText(reversed_history[self.history_index])
+
 
     def _on_send_clicked(self) -> None:
         """
@@ -79,8 +125,12 @@ class TerminalUART(QWidget):
         """
         command = self.input_field.text().strip()
         if command:
-            self.command_submitted.emit(command)
+            if not self.history or self.history[-1] != command:
+                self.history.append(command)    # Agregar comando a historial
+
+            self.command_submitted.emit(command)    # emite la senal/comando
             self.input_field.clear()
+            self.history_index = -1 # Resetear navegacion del historial
 
     def set_enabled_state(self, is_enabled: bool) -> None:
         """
@@ -91,5 +141,5 @@ class TerminalUART(QWidget):
         """
         self.input_field.setEnabled(is_enabled)
         self.btn_send.setEnabled(is_enabled)
-        opacity = "1.0" if is_enabled else "0.5"
-        self.setStyleSheet(f"opacity: {opacity};")
+        # Varia la opacidad del componente dependiendo si esta o no habilitado
+        self.setStyleSheet(f"opacity: {'1.0' if is_enabled else '0.5'};")

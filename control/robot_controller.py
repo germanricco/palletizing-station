@@ -98,7 +98,7 @@ class RobotController:
             return
         
         try:
-            # Decodificar telemetria (Ej: "T:45.0,30.0,15.0")
+            # Decodificar telemetria (Ej: "T:45.0, 30.0, 15.0, 1, 1")
             if raw_message.startswith("T:"):
                 self._handle_telemetry(raw_message[2:])
 
@@ -138,23 +138,19 @@ class RobotController:
         try:
             # Extraccion y Validacion Estructural
             partes = data_str.split(',')
-
             # Defensa contra truncamiento de trama UART
             if len(partes) != 5:
                 self.logger.warning(f"Descarte de Telemetria. Longitud de trama anomala: '{data_str}'.")
                 return
             
             # Conversion de tipos
-            q1 = float(partes[0])
-            q2 = float(partes[1])
-            q3 = float(partes[2])
-            a1_valve = bool(int(partes[3]))
-            a2_pump = bool(int(partes[4]))
+            q1, q2, q3 = float(partes[0]), float(partes[1]), float(partes[2])
+            a1_valve, a2_pump = bool(int(partes[3])), bool(int(partes[4]))
 
-            # Actualizacion de Estados en RAM (Digital Twin)
+            # Actualizar estado de Digital Twin
             self.digital_twin.update_state(q1, q2, q3)
 
-            # Controlador almacena estado logico de actuadores
+            # Almacenar estado logico de actuadores
             self.actuator_state['valve'] = a1_valve
             self.actuator_state['pump'] = a2_pump
 
@@ -170,6 +166,7 @@ class RobotController:
                 # Se asume que callback implementa mecanismos de Thread-Safe
                 self.ui_update_callback(
                     self.digital_twin.get_cartesian_state(),
+                    [q1, q2, q3],
                     self.current_state,
                     self.actuator_state
                 )
@@ -279,6 +276,59 @@ class RobotController:
     # RECIBE UN EVENTO DE ESTADO DEL STM32
     def _handle_state_event(self, event: str) -> None:
         pass
+
+
+    def send_manual_command(self, raw_command: str) -> bool:
+        """
+        Procesa comandos de texto libre ingresados por el usuario desde GUI.
+        Intercepta comandos de estado para mantener el orquestados sincronizado y
+        bloques G-Codes arbitrarios si la maquina no esta en un estado seguro.
+        """
+
+        cmd_full = raw_command.strip().upper()
+        if not cmd_full:
+            return False
+        
+        self.logger.info(f"Comando recibido desde UI: {cmd_full}")
+
+        # Extraemos el comando base
+        base_cmd = cmd_full.split()[0] if " " in cmd_full else cmd_full
+
+        # Intercepcion de Emergencia
+        if base_cmd in ["M00", "ESTOP"]:
+            self.trigger_emergency_stop()
+            return True
+        
+        # Intercepcion de maquina de estados
+        state_commands_map = {
+            "M99": self.request_idle_state,
+            "M100": self.request_manual_mode,
+            "M101": self.request_auto_ready,
+            "M110": self.start_recording,
+            "M111": self.stop_recording,
+            "M113": self.cancel_trajectory,
+            "M114": self.stop_trajectory,
+            "M115": self.resume_trajectory
+        }
+
+        if base_cmd in state_commands_map:
+            self.logger.debug(f"Interceptado comando de estado '{base_cmd}'. Enrutando a método interno.")
+            # Ejecutamos el método correspondiente y retornamos su resultado
+            return state_commands_map[base_cmd]()
+
+        # 3. Comandos Arbitrarios (G-Codes de movimiento, actuadores, etc.)
+        # Evaluamos la Condición de Guarda: ¿El estado actual permite inyección manual?
+        allowed_states_for_manual_gcode = [SystemState.IDLE, SystemState.MANUAL]
+        
+        if self.current_state not in allowed_states_for_manual_gcode:
+            self.logger.warning(
+                f"Comando arbitrario '{cmd_full}' denegado. "
+                f"El estado actual ({self.current_state.value}) no admite inyección directa."
+            )
+            return False
+
+        # 4. Despacho seguro al hardware
+        return self._dispatch_command(cmd_full, "Inyección manual desde GUI")
 
     
     # MANUAL/AUTO_READY -> IDLE
