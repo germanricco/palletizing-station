@@ -48,10 +48,13 @@ static void detenerActuadoresManuales(void) {
 
 /*
  * Primer ingreso a IDLE tras el arranque.
- * Acá sí corresponde usar servo_init().
+ * OJO:
+ * servo_base.init() ya se hace en Cpp_Main_Init().
+ * Acá NO lo repetimos para evitar doble inicialización.
  */
 static void realizarServoInitInicial(void) {
-    servo_base.init();
+    // Intencionalmente vacío.
+    // Se deja la función para conservar la estructura actual del código.
 }
 
 /*
@@ -74,7 +77,7 @@ static void enviarTelemetria(void) {
                   "T:%.2f,%.2f,%.2f,%d,%d\r\n",
                   j1_rad, j2_rad, j3_rad, a1, a2);
 
-    terminal.enviarMensaje(msg);
+    terminal.enviarNormal(msg);
 }
 
 static void enviarEstadoActualPorUart(void) {
@@ -83,7 +86,8 @@ static void enviarEstadoActualPorUart(void) {
                   "EVT:STATE,%s,%s\r\n",
                   stationFsm.getStateName(),
                   Station::toString(stationFsm.getPreviousState()));
-    terminal.enviarMensaje(msg);
+
+    terminal.enviarNormal(msg);
 }
 
 /*
@@ -149,7 +153,12 @@ static void onEnterAutoPaused(void) {
 static void onEnterFault(void) {
     Logger::logERROR("FSM -> Fault");
     detenerActuadoresManuales();
-    terminal.enviarMensaje("EVT:FAULT\r\n");
+
+    /*
+     * Evento importante, pero no ACK.
+     * Va por prioridad normal.
+     */
+    terminal.enviarNormal("EVT:FAULT\r\n");
 }
 
 static void onEnterEmergency(void) {
@@ -160,7 +169,7 @@ static void onEnterEmergency(void) {
      * TODO:
      * Desenergizar realmente motores/actuadores.
      */
-    terminal.enviarMensaje("EVT:EMERGENCY\r\n");
+    terminal.enviarNormal("EVT:EMERGENCY\r\n");
 }
 
 /*
@@ -315,8 +324,7 @@ void Cpp_Main_Init(void) {
     __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC | DMA_IT_HT | DMA_IT_TE);
 
     /*
-     * init() de la clase Servo se mantiene acá.
-     * servo_init() NO va acá: va en el primer ingreso a IDLE.
+     * Única inicialización real del servo.
      */
     servo_base.init();
 
@@ -328,7 +336,7 @@ void Cpp_Main_Init(void) {
 
     tiempo_ultimo_envio_telemetria = HAL_GetTick();
 
-    terminal.enviarMensaje(
+    terminal.enviarNormal(
         "PROTO: M100 M101 M110 M111 M112 M113 M114 M99 M00 STATUS\r\n");
 }
 
@@ -342,15 +350,19 @@ void Cpp_Main_Loop(void) {
         const char* comando = terminal.obtenerComandoPendiente();
 
         /*
-         * STATUS se responde acá.
+         * STATUS se responde acá como mensaje normal.
          */
         if (std::strcmp(comando, "STATUS") == 0) {
             enviarEstadoActualPorUart();
         } else {
-            const Station::CommandResult result = stationFsm.handleUartLine(comando, tiempo_actual);
+            const Station::CommandResult result =
+                stationFsm.handleUartLine(comando, tiempo_actual);
 
+            /*
+             * Las respuestas del protocolo (ACK/ERR) salen con prioridad alta.
+             */
             if (result.handled && (result.response[0] != '\0')) {
-                terminal.enviarMensaje(result.response);
+                terminal.enviarACK(result.response);
             }
         }
 
@@ -366,6 +378,10 @@ void Cpp_Main_Loop(void) {
         stationFsm.clearStateChangeFlag();
     }
 
+    /*
+     * Se mantiene telemetría a 50 Hz como en tu versión actual.
+     * Sale con prioridad normal.
+     */
     if ((tiempo_actual - tiempo_ultimo_envio_telemetria) >= 20U) {
         tiempo_ultimo_envio_telemetria = tiempo_actual;
         enviarTelemetria();
@@ -391,5 +407,17 @@ extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart->Instance == USART1) {
         terminal.interrupcionRecepcionByte();
+    }
+}
+
+extern "C" void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART1) {
+        terminal.onTxCompleteISR();
+    }
+}
+
+extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART1) {
+        terminal.onTxErrorISR();
     }
 }
