@@ -22,15 +22,20 @@ bool TerminalSerial::enviarMensaje(const char* mensaje) {
         return false;
     }
 
-    if (_huart->gState != HAL_UART_STATE_READY) {
-        return false;
+    uint32_t t0 = HAL_GetTick();
+    while (_huart->gState != HAL_UART_STATE_READY) {
+        if ((HAL_GetTick() - t0) > 10U) {
+            return false;
+        }
     }
 
     strncpy(_txBuffer, mensaje, TX_BUFFER_SIZE - 1);
     _txBuffer[TX_BUFFER_SIZE - 1] = '\0';
 
-    HAL_UART_Transmit_DMA(_huart, (uint8_t*)_txBuffer, strlen(_txBuffer));
-    return true;
+    return (HAL_UART_Transmit_DMA(
+                _huart,
+                reinterpret_cast<uint8_t*>(_txBuffer),
+                strlen(_txBuffer)) == HAL_OK);
 }
 
 void TerminalSerial::interrupcionRecepcionByte() {
