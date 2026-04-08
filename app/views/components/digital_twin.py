@@ -144,7 +144,7 @@ class DigitalTwin(QWidget):
         hud_right_layout.addWidget(self.lbl_cartesian)
 
         # Valores por defecto para visualización inicial
-        self.update_kinematics([45.2, -15.0, 90.5], [120.5, -45.2, 210.0])
+        self._update_kinematics([45.2, -15.0, 90.5], [120.5, -45.2, 210.0])
 
         self.hud_right.adjustSize()
 
@@ -185,7 +185,6 @@ class DigitalTwin(QWidget):
         self.timeline_layout.addWidget(self.lbl_timeline)
         
         self._update_timeline_style(0)
-
 
     def set_timeline_state(self, is_active: bool, progress: int = 0, text: str = "TRAYECTORIA ACTIVA") -> None:
         """
@@ -238,7 +237,6 @@ class DigitalTwin(QWidget):
         """
         self.canvas_3d.draw_robot(state)
 
-
     def process_telemetry(self, cartesian_state: np.ndarray, joints: list[float], state_name: str, actuator_state: dict) -> None:
         """
         Procesa el pipeline completo de actualización visual para el Gemelo Digital.
@@ -256,10 +254,10 @@ class DigitalTwin(QWidget):
             # 2. Extraer el TCP (Última fila del modelo cinemático: índice 5)
             if getattr(cartesian_state, 'shape', (0,))[0] >= 6:
                 tcp_coords = cartesian_state[5].tolist()
-                self.update_kinematics(joints, tcp_coords)
+                self.__update_kinematics(joints, tcp_coords)
             else:
                 # Si el array está incompleto, pasamos listas vacías para no actualizar con basura
-                self.update_kinematics(joints, [0.0, 0.0, 0.0])
+                self.__update_kinematics(joints, [0.0, 0.0, 0.0])
 
             # 4. Actualizar HUD Izquierdo (Estados y Actuadores)
             self._update_hud_status(state_name, actuator_state)
@@ -311,7 +309,7 @@ class DigitalTwin(QWidget):
         )
 
     # --- APIs Públicas para el Orquestador ---
-    def update_kinematics(self, joints: list[float], tcp: list[float]) -> None:
+    def _update_kinematics(self, joints: list[float], tcp: list[float]) -> None:
         """
         Actualiza los valores de la cinemática forzando el zero-padding estricto
         para evitar el jitter visual en la fuente monospace.

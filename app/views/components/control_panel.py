@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtCore import Qt, Signal
 from app.core.constants import AppConfig
-from control.robot_controller import SystemState
 
 
 class ControlPanel(QWidget):
@@ -33,6 +32,9 @@ class ControlPanel(QWidget):
     """
 
     # --- SENALES HACIA EL BACKEND ---
+    # Senal de Conexion
+    request_connection = Signal(bool)
+
     # Senales de Modo
     request_mode_idle = Signal()
     request_mode_manual = Signal()
@@ -61,6 +63,8 @@ class ControlPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"background-color: {AppConfig.COLORS.BACKGROUND};")
         
+        self._is_connected = False # Estado logico interno de la UI
+
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -74,7 +78,7 @@ class ControlPanel(QWidget):
         layout.setSpacing(int(AppConfig.SPACING.MD.replace("px", "")))
 
         # 1. Cabecera Sistema y Comunicaciones (~10%)
-        self.frame_comms = self._create_section_placeholder("1. Comunicaciones & Estado")
+        self.frame_comms = self._create_communication_section()
         
         # 2. Selección de Modos Lógicos (~15%)
         self.frame_modes = self._create_modes_section()
@@ -90,6 +94,95 @@ class ControlPanel(QWidget):
         layout.addWidget(self.frame_modes, stretch=15)
         layout.addWidget(self.frame_jogging, stretch=50)
         layout.addWidget(self.frame_memory, stretch=25)
+
+
+
+    def _create_communication_section(self) -> QFrame:
+        """
+        Construye el bloque de comunicaciones con el semáforo de estado 
+        y el botón de control de enlace UART.
+        """
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame {{"
+            f"  background-color: {AppConfig.COLORS.SURFACE};"
+            f"  border: 1px solid {AppConfig.COLORS.BORDERS};"
+            f"  border-radius: 6px;"
+            f"}}"
+        )
+        
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # --- Fila Superior: Indicador de Estado ---
+        status_layout = QHBoxLayout()
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.lbl_conn_icon = QLabel("●")
+        self.lbl_conn_text = QLabel("ESTADO: OFFLINE")
+        
+        status_layout.addWidget(self.lbl_conn_icon)
+        status_layout.addWidget(self.lbl_conn_text)
+        status_layout.addStretch()  # Empuja el texto hacia la izquierda
+
+        # --- Fila Inferior: Botón Toggle ---
+        self.btn_toggle_conn = QPushButton()
+        self.btn_toggle_conn.setFixedHeight(40)
+        self.btn_toggle_conn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle_conn.clicked.connect(self._on_toggle_clicked)
+
+        layout.addLayout(status_layout)
+        layout.addWidget(self.btn_toggle_conn)
+
+        # Forzar el renderizado inicial en modo desconectado
+        self.set_connection_state(False)
+        
+        return frame
+    
+    def _on_toggle_clicked(self) -> None:
+        """Slot interno que emite la intención del usuario hacia el orquestador."""
+        # Si NO estamos conectados, solicitamos conexión (True), y viceversa.
+        self.request_connection.emit(not self._is_connected)
+
+    def set_connection_state(self, is_connected: bool) -> None:
+        """
+        API Pública para actualizar visualmente el estado de comunicación.
+        Implementa los estilos dinámicos del Design Handoff.
+        """
+        self._is_connected = is_connected
+
+        if is_connected:
+            # Estado: CONECTADO (Verde y Cian)
+            self.lbl_conn_icon.setStyleSheet(f"color: {AppConfig.COLORS.SEMANTIC_AUTO}; font-size: 16px; border: none; background: transparent;")
+            self.lbl_conn_text.setStyleSheet(f"color: {AppConfig.COLORS.TEXT_HIGH}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; border: none; background: transparent;")
+            self.lbl_conn_text.setText("ESTADO: ONLINE")
+            
+            self.btn_toggle_conn.setText("ENLACE SERIAL ACTIVO")
+            self.btn_toggle_conn.setStyleSheet(
+                f"background-color: rgba(0, 240, 255, 0.1);"
+                f"border: 1px solid {AppConfig.COLORS.SEMANTIC_MANUAL};"
+                f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};"
+                f"border-radius: 4px;"
+                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+                f"font-weight: bold;"
+            )
+        else:
+            # Estado: DESCONECTADO (Rojo y Gris)
+            self.lbl_conn_icon.setStyleSheet(f"color: {AppConfig.COLORS.SEMANTIC_ESTOP}; font-size: 16px; border: none; background: transparent;")
+            self.lbl_conn_text.setStyleSheet(f"color: {AppConfig.COLORS.TEXT_MED}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; border: none; background: transparent;")
+            self.lbl_conn_text.setText("ESTADO: OFFLINE")
+
+            self.btn_toggle_conn.setText("CONECTAR STM32")
+            self.btn_toggle_conn.setStyleSheet(
+                f"background-color: #2A2A2A;"
+                f"border: 1px solid {AppConfig.COLORS.BORDERS};"
+                f"color: #8E8E93;"
+                f"border-radius: 4px;"
+                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+                f"font-weight: bold;"
+            )
+
 
 
     # METODOS RELACIONADOS A SECCION DE MODOS
