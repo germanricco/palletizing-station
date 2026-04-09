@@ -18,10 +18,12 @@ from PySide6.QtCore import Qt
 from app.core.constants import AppConfig
 
 # Componentes de la UI
+from app.views.components.safety_panel import SafetyPanel
+from app.views.components.control_panel import ControlPanel
 from app.views.components.terminal_uart import TerminalUART
 from app.views.components.log_viewer import LogViewer
-from app.views.components.control_panel import ControlPanel
 from app.views.components.digital_twin import DigitalTwin
+
 
 from control.robot_controller import SystemState
 
@@ -65,19 +67,23 @@ class MainWindow(QMainWindow):
         left_col_layout.setSpacing(0)
 
         # Columna Derecha (Operación)
-        right_col_widget = QWidget()
+        right_col_widget = QFrame()
+        right_col_widget.setObjectName("RightColumn")
+        
         right_col_layout = QVBoxLayout(right_col_widget)
-        right_col_layout.setContentsMargins(0, 0, 0, 0)
+        right_col_layout.setContentsMargins(1, 0, 0, 0)
         right_col_layout.setSpacing(0)
         
         # Borde divisor de la columna derecha (border-left 1px)
         right_col_widget.setStyleSheet(
-            f"border-left: 1px solid {AppConfig.COLORS.BORDERS};"   # Division a la izquierda de la columna derecha
+            f"QWidget#RightColumn {{"
+            f"  border-left: 1px solid {AppConfig.COLORS.BORDERS};"
+            f"}}"
         )
 
         # Agregamos las columnas al layout maestro
-        main_layout.addWidget(left_col_widget, stretch=75)  # 75%
-        main_layout.addWidget(right_col_widget, stretch=25) # 25%
+        main_layout.addWidget(left_col_widget, stretch=75)
+        main_layout.addWidget(right_col_widget, stretch=25)
 
         # ENSAMBLADO: COLUMNA IZQUIERDA (75vw)
         # Fila Superior: Gemelo Digital y Barra de Progreso
@@ -137,28 +143,25 @@ class MainWindow(QMainWindow):
         bottom_left_layout.addWidget(self.terminal_widget, stretch=20)
         
         # Insercion final en la columna izquierda
-        left_col_layout.addWidget(self.digital_twin_widget, stretch=70)
+        left_col_layout.addWidget(self.digital_twin_container, stretch=70)
         left_col_layout.addWidget(bottom_left_widget, stretch=30)
 
         # ENSAMBLADO: COLUMNA DERECHA (25vw)
-
         # Bloque Superior: Seguridad / E-Stop (15vh)
-        self.frame_safety = self._create_placeholder_frame(
-            name="SafetyEStop",
-            bg_color=AppConfig.COLORS.SURFACE
-        )
+        self.safety_panel_widget = SafetyPanel()
         
         # Bloque Inferior: Panel de Control (85vh)
         self.control_panel_widget = ControlPanel()
 
         self.control_panel_widget.setStyleSheet(
             f"ControlPanel {{"
+            f"  background-color: {AppConfig.COLORS.BACKGROUND};"
             f"  border-top: 1px solid {AppConfig.COLORS.BORDERS};"
             f"}}"
         )
 
         # Asignar stretch factors para 15vh / 85vh
-        right_col_layout.addWidget(self.frame_safety, stretch=15)
+        right_col_layout.addWidget(self.safety_panel_widget, stretch=15)
         right_col_layout.addWidget(self.control_panel_widget, stretch=85)
     
     def _create_placeholder_frame(self, name: str, bg_color: str) -> QFrame:
@@ -197,13 +200,16 @@ class MainWindow(QMainWindow):
         """
         state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
         
-        # Detectamos sub-estado de simulacion
+        #! Detectamos sub-estado de simulacion
         is_simulating = (state_name == "AUTO_READY" and progress > 0)
 
         # GESTION DE TERMINAL Y SEGURIDAD MANUAL
         is_safe_for_manual = state_name in ["IDLE", "MANUAL", "AUTO_READY", "RECORDING"]
+        
+        #!
         if is_simulating:
             is_safe_for_manual = False
+            
         self.terminal_widget.set_enabled_state(is_safe_for_manual)
         
         # GESTION DE BARRA DE PROGRESO
@@ -230,6 +236,10 @@ class MainWindow(QMainWindow):
             # Llamada estándar para actualizar Segmented Controls y botones base
             self.control_panel_widget.update_machine_state(current_state)
             
+            # Enrutamiento de la telemetría dual al panel
+            if getattr(cartesian_state, 'shape', (0,))[0] >= 6:
+                tcp_coords = cartesian_state[5].tolist()
+                self.control_panel_widget.update_telemetry(joints, tcp_coords)
             # --- Inyección de Lógica Visual para la Simulación ---
             # Como la interfaz de simulación vive en el panel, pero el panel 
             # no conoce la variable "progress", lo ajustamos desde aquí:
@@ -247,5 +257,5 @@ class MainWindow(QMainWindow):
         
 
         # ENRUTAMIENTO AL PANEL DE SEGURIDAD (Próximamente)
-        # if hasattr(self, 'safety_panel_widget'):
-        #     self.safety_panel_widget.update_safety_status(current_state)
+        if hasattr(self, 'safety_panel_widget'):
+            self.safety_panel_widget.update_safety_status(state_name)

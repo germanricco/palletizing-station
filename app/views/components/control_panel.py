@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from PySide6.QtCore import Qt, Signal
 from app.core.constants import AppConfig
-
+from app.views.components.jogging_card import JoggingCard
 
 class ControlPanel(QWidget):
     """
@@ -53,6 +53,9 @@ class ControlPanel(QWidget):
     request_resume_trajectory = Signal()    # Llama a resume_trajectory()
     request_cancel_trajectory = Signal()    # Llama a cancel_trajectory()
 
+    # Senales de Jogging
+    request_jog = Signal(str, int, float)
+
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Inicializa el Panel de Control y su layout estructural."""
@@ -61,9 +64,14 @@ class ControlPanel(QWidget):
         
         # Habilitar el renderizado de estilos QSS en el QWidget base
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"background-color: {AppConfig.COLORS.BACKGROUND};")
+        self.setStyleSheet(
+            f"ControlPanel {{"
+            f"  background-color: {AppConfig.COLORS.BACKGROUND};"
+            f"}}"
+        )
         
         self._is_connected = False # Estado logico interno de la UI
+        self._jog_mode = "ARTICULAR"  # Estado del sistema de coordenadas
 
         self._setup_ui()
 
@@ -84,7 +92,7 @@ class ControlPanel(QWidget):
         self.frame_modes = self._create_modes_section()
 
         # 3. Tarjetas de Teleoperación / Jogging 3 GDL (~50%)
-        self.frame_jogging = self._create_section_placeholder("3. Teleoperación (GDL 1, 2, 3)")
+        self.frame_jogging = self._create_jogging_section()
         
         # 4. Gestión de Trayectorias y Memoria (~25%)
         self.frame_memory = self._create_memory_section()
@@ -183,6 +191,96 @@ class ControlPanel(QWidget):
                 f"font-weight: bold;"
             )
 
+
+    # METODOS RELACIONAS A JOGGING
+    def _create_jogging_section(self) -> QWidget:
+        """Estructura la sección de Jogging con su cabecera y tarjetas."""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        # --- HEADER (Título y Botón Toggle de Modo) ---
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        lbl_section = QLabel("TELEOPERACIÓN")
+        lbl_section.setStyleSheet(
+            f"color: {AppConfig.COLORS.TEXT_HIGH};"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+            f"font-size: 16px;"
+            f"font-weight: {AppConfig.TYPOGRAPHY.WEIGHT_BOLD};"
+        )
+        
+        self.btn_jog_mode = QPushButton("MODO: ARTICULAR")
+        self.btn_jog_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_jog_mode.setFixedHeight(28)
+        self.btn_jog_mode.setStyleSheet(self._get_jog_btn_style("ARTICULAR"))
+        self.btn_jog_mode.clicked.connect(self._on_toggle_jog_mode)
+
+        header_layout.addWidget(lbl_section)
+        header_layout.addStretch()
+        header_layout.addWidget(self.btn_jog_mode)
+
+        # --- TARJETAS ---
+        self.cards = [
+            JoggingCard(axis_id=0),
+            JoggingCard(axis_id=1),
+            JoggingCard(axis_id=2)
+        ]
+
+        # Conectar señales enrutándolas por el ID y adjuntando el modo actual
+        for i, card in enumerate(self.cards):
+            card.request_step.connect(lambda step, axis=i: self.request_jog.emit(self._jog_mode, axis, step))
+            layout.addWidget(card)
+        
+        layout.addLayout(header_layout)
+        # Reordenamos: Insertamos el header al principio del layout vertical
+        layout.insertLayout(0, header_layout)
+        
+        layout.addStretch()
+        return container
+
+    def _get_jog_btn_style(self, mode: str) -> str:
+        """Retorna el estilo dinámico para el botón de toggle de coordenadas."""
+        base_color = AppConfig.COLORS.SEMANTIC_RECORD if mode == "ARTICULAR" else AppConfig.COLORS.SEMANTIC_MANUAL
+        return (
+            f"QPushButton {{"
+            f"  background-color: transparent;"
+            f"  color: {base_color};"
+            f"  border: 1px solid {base_color};"
+            f"  border-radius: 14px;"
+            f"  padding: 0px 12px;"
+            f"  font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+            f"  font-size: 12px;"
+            f"  font-weight: bold;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  background-color: {AppConfig.COLORS.SURFACE};"
+            f"}}"
+        )
+
+    def _on_toggle_jog_mode(self) -> None:
+        """Cambia el sistema de coordenadas y actualiza la UI."""
+        self._jog_mode = "CARTESIANO" if self._jog_mode == "ARTICULAR" else "ARTICULAR"
+        
+        self.btn_jog_mode.setText(f"MODO: {self._jog_mode}")
+        self.btn_jog_mode.setStyleSheet(self._get_jog_btn_style(self._jog_mode))
+        
+        for card in self.cards:
+            card.set_mode(self._jog_mode)
+
+    # --- API PÚBLICA PARA EL CONTROLADOR CENTRAL ---
+    def update_telemetry(self, joints: list[float], tcp: list[float]) -> None:
+        """
+        Alimenta las tarjetas con los datos del hardware, 
+        filtrando según el modo activo.
+        """
+        data_source = joints if self._jog_mode == "ARTICULAR" else tcp
+        
+        if len(data_source) >= 3:
+            for i in range(3):
+                self.cards[i].update_value(data_source[i])
 
 
     # METODOS RELACIONADOS A SECCION DE MODOS

@@ -94,7 +94,6 @@ class RobotGUIApp:
             self.controller.send_manual_command
         )
 
-
         # 3. Panel de Control
         panel = self.window.control_panel_widget
         
@@ -119,6 +118,12 @@ class RobotGUIApp:
         panel.request_resume_trajectory.connect(self.controller.resume_trajectory)
         panel.request_cancel_trajectory.connect(self.controller.cancel_trajectory)
 
+        # 4. Panel de Seguridad
+        safety = self.window.safety_panel_widget
+        safety.request_e_stop.connect(self.controller.trigger_emergency_stop)
+
+        # (Si en el futuro agregas un método 'reset_emergency_stop' al backend, 
+        # puedes conectarlo aquí con: safety.request_e_reset.connect(self.controller.reset_emergency))
 
     def _handle_connection_request(self, request_connect: bool) -> None:
         """

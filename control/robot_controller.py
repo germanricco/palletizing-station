@@ -102,6 +102,7 @@ class RobotController:
         return self.uart._running and self.uart.serial_conn is not None and self.uart.serial_conn.is_open
     
 
+    # INIT -> IDLE
     def start_connection(self, max_retries: int = 3, delay_seconds: float = 1.0) -> bool:
         """
         Intenta establecer la conexion UART con el microcontrolador
@@ -127,7 +128,7 @@ class RobotController:
                 
                 # Sincronización del Espejo: Forzamos el estado a IDLE al conectar
                 # Esto limpia cualquier estado residual previo.
-                
+
                 self.request_idle_state()
                 return True
 
@@ -143,6 +144,7 @@ class RobotController:
         return False
     
 
+    # ANY -> INIT
     def finish_connection(self) -> None:
         """
         Cierra la conexión UART de forma segura, aborta operaciones en curso 
@@ -332,7 +334,7 @@ class RobotController:
         
         # Acciones de salida del estado anterior
         if self.current_state == SystemState.RECORDING and new_state != SystemState.RECORDING:
-            self.logger.debug("Finalizando sesion de grabacion. Procesando datos.")
+            self.logger.debug("Finalizando grabacion. Procesando datos.")
 
             if len(self.recording_buffer) > 0:
                 # Se delega el guardado al TrajectoryRepository.
@@ -361,17 +363,6 @@ class RobotController:
         # Cambio de estado efectivo
         self.current_state = new_state
         self.logger.info(f"Sistema en modo: {self.current_state.value}.")
-
-        """
-        # Notificacion a la Interfaz de Usuario
-        if self.ui_update_callback:
-            # Se envía el estado cartesiano actual y el nuevo estado de la máquina
-            self.ui_update_callback(
-                self.robot.get_cartesian_state(), 
-                self.current_state,
-                self.actuator_state
-            )
-        """
 
 
     # RECIBE UN EVENTO DE ESTADO DEL STM32
