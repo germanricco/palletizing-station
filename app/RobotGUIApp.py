@@ -28,7 +28,8 @@ class SignalBridge(QObject):
     # * list: Lista de telemetria con angulos articulares
     # * object: Objeto con el estado del sistema
     # * dict: Objeto con el estado de actuadores
-    telemetry_received = Signal(np.ndarray, list, object, dict)
+    # * int: Progreso de la trayectoria 
+    telemetry_received = Signal(np.ndarray, list, object, dict, int)
 
 
 
@@ -42,6 +43,7 @@ class RobotGUIApp:
         """
         Inicializa los componentes principales de la arquitectura.
         """
+        # Aplicacion y Controlador
         self.app = app
         self.controller = controller
         
@@ -49,17 +51,22 @@ class RobotGUIApp:
         self.window = MainWindow()
         self.bridge = SignalBridge()
 
-        # Variables para Throttling
+        # Variables para Throttling (bajar fps)
         self._last_telemetry_time = 0.0
-        # 20FPS es ideal
-        self._ui_refresh_rate = 1.0 / 20.0
+        self._ui_refresh_rate = 1.0 / 20.0  # 20FPS es ideal
+
+        # Memoria de Estados Criticos
+        self._last_state_name = ""
+        self._last_progress = -1
         
         self._apply_styles()
         self._setup_connections()
 
 
     def _setup_logging(self) -> None:
-        """Configura el formato estándar para los logs de la aplicación."""
+        """
+        Configura el formato estándar para los logs de la aplicación.
+        """
         logging.basicConfig(
             level=logging.INFO,
             format="[%(asctime)s] | [%(levelname)s] | [%(module)s] | %(message)s",
@@ -68,7 +75,9 @@ class RobotGUIApp:
         logging.info("Inicializando Robot Control GUI (Orientado a Objetos)...")
 
     def _apply_styles(self) -> None:
-        """Aplica la paleta base y procesa el QSS global."""
+        """
+        Aplica la paleta base y procesa el QSS global.
+        """
         StyleManager.apply_base_palette(self.app)
 
     def _setup_connections(self) -> None:
@@ -78,7 +87,6 @@ class RobotGUIApp:
         """
         # 1. Telemetria.
         self.controller.ui_update_callback = self._on_backend_telemetry_update
-        # Conexión directa hacia la actualización central de la MainWindow
         self.bridge.telemetry_received.connect(self.window.update_dashboard)
 
         # 2. Comandos Manuales.
@@ -86,17 +94,80 @@ class RobotGUIApp:
             self.controller.send_manual_command
         )
 
-    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict) -> None:
+        # 3. Panel de Control
+        panel = self.window.control_panel_widget
+        
+        # Conexiones de comunicacion
+        panel.request_connection.connect(self._handle_connection_request)
+
+        # Conexiones de Modos
+        panel.request_mode_idle.connect(self.controller.request_idle_state)
+        panel.request_mode_manual.connect(self.controller.request_manual_mode)
+        panel.request_mode_auto.connect(self.controller.request_auto_ready)
+
+        # Conexiones de Memoria
+        panel.request_start_recording.connect(self.controller.start_recording)
+        panel.request_stop_recording.connect(self.controller.stop_recording)
+        panel.request_load_trajectory.connect(self.controller.load_trajectory)
+        
+        # Conexiones de ejecucion de trayectoria
+        panel.request_execute_auto.connect(self.controller.execute_auto)
+        panel.request_simulate_trajectory.connect(self.controller.simulate_trajectory)
+        panel.request_stop_simulation.connect(self.controller.stop_simulation)
+        panel.request_pause_trajectory.connect(self.controller.stop_trajectory)
+        panel.request_resume_trajectory.connect(self.controller.resume_trajectory)
+        panel.request_cancel_trajectory.connect(self.controller.cancel_trajectory)
+
+        # 4. Panel de Seguridad
+        safety = self.window.safety_panel_widget
+        safety.request_e_stop.connect(self.controller.trigger_emergency_stop)
+
+        # (Si en el futuro agregas un método 'reset_emergency_stop' al backend, 
+        # puedes conectarlo aquí con: safety.request_e_reset.connect(self.controller.reset_emergency))
+
+    def _handle_connection_request(self, request_connect: bool) -> None:
+        """
+        Actúa como intermediario entre la acción del botón en la UI 
+        y el hardware serial en el backend.
+        """
+        if request_connect:
+            # Pide conexión al backend (esto bloqueará la UI brevemente según max_retries/delay)
+            success = self.controller.start_connection(max_retries=3, delay_seconds=1.0)
+            
+            # Se haya conectado o no, actualizamos el botón según la propiedad oficial del backend
+            self.window.control_panel_widget.set_connection_state(self.controller.is_connected)
+        else:
+            # Pide desconexión
+            self.controller.finish_connection()
+            self.window.control_panel_widget.set_connection_state(self.controller.is_connected)
+
+
+    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict, progress=0) -> None:
         """
         ATENCIÓN: Este método es llamado por el hilo RX del AsyncUARTCommunicator.
         Su única responsabilidad es emitir la señal para cruzar al hilo principal.
         """
         now = time.time()
         
-        # Solo emitimos la señal a la GUI si ha pasado el tiempo de refresco estipulado
-        if (now - self._last_telemetry_time) >= self._ui_refresh_rate:
-            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state)
+        state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
+        
+        # 1. EVALUACIÓN DE BYPASS CRÍTICO
+        # ¿El estado general cambió? ¿O el progreso saltó a 0 (abortado) o a 1 (iniciado)?
+        is_critical_change = (
+            (state_name != self._last_state_name) or 
+            (progress == 0 and self._last_progress > 0) or 
+            (progress == 1 and self._last_progress == 0)
+        )
+        
+        # 2. PUERTA LÓGICA
+        # Pasa si es urgente (bypass) O si ya pasó el tiempo de refresco (throttling normal)
+        if is_critical_change or (now - self._last_telemetry_time) >= self._ui_refresh_rate:
+            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state, progress)
+            
+            # Actualizamos la memoria
             self._last_telemetry_time = now
+            self._last_state_name = state_name
+            self._last_progress = progress
 
     def run(self) -> None:
         """

@@ -54,7 +54,9 @@ def main():
     # 3. Instanciar el Controlador de Hardware
     TARGET_PORT = "/dev/ttyUSB0"  # Adaptar según el SO (ej. COM3 en Windows)
     BAUD_RATE = 115200
-    robot_controller = RobotController(port=TARGET_PORT, baudrate=BAUD_RATE)
+    CHUNK_SIZE = 15
+    LOG_LEVEL = logging.INFO
+    robot_controller = RobotController(port=TARGET_PORT, baudrate=BAUD_RATE, chunk_size=CHUNK_SIZE, log_level=LOG_LEVEL)
 
     # 4. Instanciar la Interfaz de Usuario
     gui_app = RobotGUIApp(app, robot_controller)
@@ -65,13 +67,6 @@ def main():
 
     # 6. Cierre seguroC
     app.aboutToQuit.connect(lambda: graceful_shutdown(robot_controller))
-
-    # 7. Levantar la comunicación física con el hardware
-    logging.info(f"Intentando abrir el canal de comunicación en {TARGET_PORT}...")
-    if not robot_controller.uart.connect():
-        logging.error("Fallo crítico: No se pudo abrir el puerto UART.")
-        # Opcional: Podrías mostrar un QDialog de error aquí antes de abortar, 
-        # o permitir que la UI inicie en un modo 'Offline/Simulación'.
 
     # 8. Desplegar la ventana y entregar el control al Event Loop
     gui_app.run()

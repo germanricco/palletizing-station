@@ -1,21 +1,19 @@
 import logging
-import os
+import threading
 import time
 import numpy as np
 from enum import Enum
 from typing import Callable, Optional, List
 
-# IMPORTAMOS MODULOS
 from utils.system_logger import SystemLogger
 from utils.trajectory_repository import TrajectoryRepository
 from control.robot_EEZYbotMK2 import RoboticArmMK2
 from communication.async_uart import AsyncUARTCommunicator
 from control.trajectory_streamer import TrajectoryStreamer
-#from control.trajectory_streamer import StreamState
 
 class SystemState(Enum):
     """
-    Enumeracion de la Maquina de Estados (Tiene que se espejo del STM32)
+    Enumeracion de la Maquina de Estados.
     """
     BOOT = "BOOT",
     INIT = "INIT",
@@ -28,6 +26,7 @@ class SystemState(Enum):
     FAULT = "FAULT",
     EMERGENCY = "EMERGENCY"
 
+
 class RobotController:
     """
     Controlador Maestro del sistema robotico.
@@ -39,7 +38,10 @@ class RobotController:
         Instancia y ensambla todos los subsistemas del controlador
 
         Parametros:
-
+            * port: Puerto UART a utilizar
+            * baudrate: Velocidad de transmision en baudios
+            * chunk_size: Tamaño de los paquetes de transmision
+            * log_level: Nivel de logging
         """
         # Instancia de SystemLogger
         self.system_logger = SystemLogger(log_dir="logs", log_level=log_level)
@@ -47,7 +49,7 @@ class RobotController:
         self.logger.info("Iniciando secuencia de arranque de RobotController...")
 
         # Sistema inicia asumiendo que el hardware ha completado su boot y esta listo.
-        self.current_state: SystemState= SystemState.IDLE
+        self.current_state: SystemState= SystemState.INIT
 
         # Buffer dinamico en RAM para modo RECORDING
         self.recording_buffer: List[List[float]] = []
@@ -62,7 +64,7 @@ class RobotController:
 
         # Gemelo Digital
         self.logger.debug("Instanciando Gemelo Digital (RoboticArmMK2).")
-        self.digital_twin = RoboticArmMK2()
+        self.robot = RoboticArmMK2()
 
         # Interfaz de Hardware
         self.logger.debug("Configurando enlace UART en {port} @ {baudrate}")
@@ -81,13 +83,100 @@ class RobotController:
             'pump': False
         }
 
-        # Callback de UI.
-        #! ACTUALIZAR FIRMA DE CALLBACK
         self.ui_update_callback = None
+
+        # Variables para simulacion
+        self.active_trajectory = None
+        self._is_simulating = False
+        self._simulation_thread = None
+
 
         self.logger.info("RobotController ensamblado con exito. Estado actual: {self.current_state.value}.")
     
     
+    @property
+    def is_connected(self) -> bool:
+        """
+        Propiedad de solo lectura para verificar si el enlace esta activo.
+        """
+        return self.uart._running and self.uart.serial_conn is not None and self.uart.serial_conn.is_open
+    
+
+    # INIT -> IDLE
+    def start_connection(self, max_retries: int = 3, delay_seconds: float = 1.0) -> bool:
+        """
+        Intenta establecer la conexion UART con el microcontrolador
+
+        Parametros:
+            max_retries: Numero de intentos antes de abortar.
+            delay_seconds: Tiempo de espera entre intentos fallidos.
+
+        Retorno:
+            bool: True si la conexion fue exitosa, False si se agotaron los intentos.
+        """
+        if self.is_connected:
+            self.logger.warning("El sistema ya se encuentra conectado.")
+            return True
+        
+        self.logger.info(f"Iniciando proceso de conexion (Max. intentos: {max_retries})...")
+
+        for attempt in range(1, max_retries+1):
+            self.logger.debug(f"Intento de conexion {attempt}/{max_retries} en puerto {self.uart.port}.")
+
+            if self.uart.connect():
+                self.logger.info("Conexión UART establecida exitosamente.")
+                
+                # Sincronización del Espejo: Forzamos el estado a IDLE al conectar
+                # Esto limpia cualquier estado residual previo.
+
+                self.request_idle_state()
+                return True
+
+            if attempt < max_retries:
+                self.logger.warning(f"Fallo en el intento {attempt}. Reintentando en {delay_seconds}s...")
+                time.sleep(delay_seconds)
+
+        self.logger.error("Se agotaron los intentos de conexión. Hardware no accesible.")
+        
+        # Si la conexión falla, retrocedemos al estado INIT (semánticamente correcto 
+        # dentro de tu Enum para "esperando inicialización del hardware").
+        self._change_internal_state(SystemState.INIT)
+        return False
+    
+
+    # ANY -> INIT
+    def finish_connection(self) -> None:
+        """
+        Cierra la conexión UART de forma segura, aborta operaciones en curso 
+        y limpia el estado de las variables volátiles.
+        """
+        self.logger.info("Solicitud de desconexión recibida. Abortando procesos activos...")
+
+        # 1. Parada de seguridad a nivel de software (Evita fugas de memoria y bloqueos lógicos)
+        self.streamer.reset()
+        self.recording_buffer.clear()
+
+        # 2. Handshake de Desconexión (Hardware Sleep)
+        if self.is_connected:
+            self.logger.info("Enviando comando M98 (Hardware Sleep / Go to INIT)...")
+            
+            # Usamos send_message directamente (en lugar de _dispatch_command) 
+            # porque no esperaremos el ACK_M98. Vamos a cortar la conexión inmediatamente.
+            self.uart.send_message("M98")
+            
+            # Retardo bloqueante mínimo (100ms) para permitir que el hilo de TX
+            # vacíe la cola (tx_queue) y los bytes salgan por el cable físico.
+            import time
+            time.sleep(0.1)
+
+        # 3. Desconexión física a través de la capa de comunicación
+        self.uart.disconnect()
+
+        # 4. Forzar el estado local a INIT para reflejar la pérdida de enlace
+        self._change_internal_state(SystemState.INIT)
+        self.logger.info("Desconexión finalizada de manera segura. Sistema Offline.")
+
+
     # GESTION DE EVENTOS. LOS VA DIRIGIENDO DONDE SEAN NECESARIOSss
     def _route_serial_message(self, raw_message: str) -> None:
         """
@@ -118,9 +207,6 @@ class RobotController:
                 # Si el mensaje pertenece al protocolo de streaming, lo delegamos al TrajectoryStreamer
                 self.streamer.process_message(raw_message)
 
-            elif raw_message.startswith("EVT:"):
-                pass
-
             # Mensaje no reconocido
             else:
                 self.logger.debug(f"Mensaje no reconocido del STM32: {raw_message}")
@@ -129,7 +215,7 @@ class RobotController:
             self.logger.error(f"Error procesando mensaje RX '{raw_message}': {e}")
 
     
-    # PROCESA TELEMETRIA A 50HZ Y ACTUALIZA DIGITAL_TWIN + UI
+    # PROCESA TELEMETRIA A 50HZ Y ACTUALIZA robot + UI
     def _handle_telemetry(self, data_str: str) -> None:
         """
         Procesa la trama de telemetria asincrona a 50Hz.
@@ -138,6 +224,7 @@ class RobotController:
         try:
             # Extraccion y Validacion Estructural
             partes = data_str.split(',')
+
             # Defensa contra truncamiento de trama UART
             if len(partes) != 5:
                 self.logger.warning(f"Descarte de Telemetria. Longitud de trama anomala: '{data_str}'.")
@@ -147,10 +234,14 @@ class RobotController:
             q1, q2, q3 = float(partes[0]), float(partes[1]), float(partes[2])
             a1_valve, a2_pump = bool(int(partes[3])), bool(int(partes[4]))
 
-            # Actualizar estado de Digital Twin
-            self.digital_twin.update_state(q1, q2, q3)
+            # Si estamos simulando ignoramos la telemetria
+            if self._is_simulating:
+                return
+            
+            # Actualizar estado del Digital Twin
+            self.robot.update_state(q1, q2, q3)
 
-            # Almacenar estado logico de actuadores
+            # Almacenar estado logico de actuadores en diccionario
             self.actuator_state['valve'] = a1_valve
             self.actuator_state['pump'] = a2_pump
 
@@ -161,11 +252,11 @@ class RobotController:
                     float(a1_valve), float(a2_pump)
                 ])
 
-            # Propagacion hacia la UI (Observer Pattern)
+            # Propagacion de telemetria hacia la UI (Observer Pattern)
             if self.ui_update_callback is not None:
                 # Se asume que callback implementa mecanismos de Thread-Safe
                 self.ui_update_callback(
-                    self.digital_twin.get_cartesian_state(),
+                    self.robot.get_cartesian_state(),
                     [q1, q2, q3],
                     self.current_state,
                     self.actuator_state
@@ -178,9 +269,13 @@ class RobotController:
             self.logger.error(f"Fallo critico no gestionado en pipeline de telemetria: {e}")
 
 
+    #! COMPLETAR
     def _handle_async_event(self, event_msg: str) -> None:
         """
         Enrutador para eventos iniciados por el microcontrolador.
+
+        Parametros:
+            event_msg: Codigo de evento de hardware
         """
         if event_msg == "ESTOP":
             self.logger.critical("Hardware reporto activacion de parada de emergencia.")
@@ -197,7 +292,10 @@ class RobotController:
 
     def _handle_state_ack(self, ack_msg: str) -> None:
         """
-        Mapea los codigos de confirmacion del STM32 a la enumeracion SystemState
+        Mapea los codigos de confirmacion del STM32 a la enumeracion 
+        
+        Parametros:
+            ack_msg: Codigo de confirmacion de comando
         """
         mapping = {
             "ACK_M99": SystemState.IDLE,
@@ -227,13 +325,16 @@ class RobotController:
     def _change_internal_state(self, new_state: SystemState) -> None:
         """
         Actualiza el estado actual, gestionando transiciones logicas y notifica a la UI.
+
+        Parametros:
+            new_state: Nuevo estado
         """
         if self.current_state == new_state:
             return
         
         # Acciones de salida del estado anterior
         if self.current_state == SystemState.RECORDING and new_state != SystemState.RECORDING:
-            self.logger.debug("Finalizando sesion de grabacion. Procesando datos.")
+            self.logger.debug("Finalizando grabacion. Procesando datos.")
 
             if len(self.recording_buffer) > 0:
                 # Se delega el guardado al TrajectoryRepository.
@@ -263,17 +364,6 @@ class RobotController:
         self.current_state = new_state
         self.logger.info(f"Sistema en modo: {self.current_state.value}.")
 
-        """
-        # Notificacion a la Interfaz de Usuario
-        if self.ui_update_callback:
-            # Se envía el estado cartesiano actual y el nuevo estado de la máquina
-            self.ui_update_callback(
-                self.digital_twin.get_cartesian_state(), 
-                self.current_state,
-                self.actuator_state
-            )
-        """
-
 
     # RECIBE UN EVENTO DE ESTADO DEL STM32
     def _handle_state_event(self, event: str) -> None:
@@ -287,6 +377,7 @@ class RobotController:
         bloques G-Codes arbitrarios si la maquina no esta en un estado seguro.
         """
 
+        # Convierte todo a mayusculas
         cmd_full = raw_command.strip().upper()
         if not cmd_full:
             return False
@@ -333,18 +424,25 @@ class RobotController:
         return self._dispatch_command(cmd_full, "Inyección manual desde GUI")
 
     
-    # MANUAL/AUTO_READY -> IDLE
+    # MANUAL/AUTO_READY/INIT -> IDLE
     def request_idle_state(self) -> bool:
         """
         Solicita al microcontrolador la transicion al estado IDLE.
         Inicia la rutina de retorno suave (Soft Homing) en el hardware.
+
+        Retorno:
+            bool: True si el comando fue enviado y encolado exitosamente
+                  False si la transicion es invalida o el buffer de transmision esta lleno.
         """
         # Evaluacion de la Condicion de Guarda
-        if self.current_state not in [SystemState.MANUAL, SystemState.AUTO_READY]:
+        valid_states = [SystemState.MANUAL, SystemState.AUTO_READY, SystemState.INIT]
+
+        if self.current_state not in valid_states:
             self.logger.warning(f"Transicion a IDLE denegada. Incompatibilidad de estado.")
             return False
         
         return self._dispatch_command("M99", "Soft Homing / IDLE")
+
 
     # IDLE -> MANUAL
     def request_manual_mode(self) -> bool:
@@ -369,6 +467,10 @@ class RobotController:
         """
         Solicita al microcontrolador la transicion al modo RECORDING
         Verifica que el sistema este operando en modo MANUAL antes de admitir el comando M110.
+
+        Retorno:
+            bool: True si el comando fue enviado y encolado exitosamente
+                  False si la transicion es invalida o el buffer de transmision esta lleno.
         """
         # Evaluacion de la Condicion de Guarda
         if self.current_state != SystemState.MANUAL:
@@ -383,6 +485,10 @@ class RobotController:
         """
         Solicita al microcontrolador finalizar la sesion de grabacion actual.
         Verifica que el sistema este operando en modo RECORDGING.
+
+        Retorno:
+            bool: True si el comando fue enviado y encolado exitosamente
+                  False si la transicion es invalida o el buffer de transmision esta lleno.
         """
         # Evaluacion de la Condicion de Guarda
         if self.current_state != SystemState.RECORDING:
@@ -392,9 +498,14 @@ class RobotController:
         return self._dispatch_command("M111", "Stop Recording")
         
 
+    # IDLE -> AUTO_READY
     def request_auto_ready(self) -> bool:
         """
         Solicita la habilitacion del modo de reproduccion automatica.
+
+        Retorno:
+            bool: True si el comando fue enviado y encolado exitosamente
+                  False si la transicion es invalida o el buffer de transmision esta lleno.
         """
         # Evaluacion de la Condicion de Guarda
         if self.current_state != SystemState.IDLE:
@@ -404,11 +515,12 @@ class RobotController:
         return self._dispatch_command("M101", "Enable Auto Mode")
 
 
-    # IDLE -> AUTO_READY
     def load_trajectory(self, trajectory_name: str) -> bool:
         """
-        Carga de memoria RAM.
-        Requiere validacion de estado
+        Carga de memoria RAM. Requiere validacion de estado
+
+        Retorno:
+            bool: True si la carga fue exitosa, False si hubo un fallo
         """
         # Evaluacion de la Condicion de Guarda
         if self.current_state != SystemState.AUTO_READY:
@@ -429,11 +541,17 @@ class RobotController:
         #! PARA QUE SE RENDERICE LA TRAYECTORIA PROYECTADA EN ROJO
         return True
 
-    
+
+    # AUTO_READY -> AUTO_RUNNING
     def execute_auto(self) -> bool:
         """
         Delega la ejecución de la matriz cacheada al TrajectoryStreamer.
         """
+        if self._is_simulating:
+            self.logger.info("Abortando simulación para iniciar ejecución real.")
+            self._is_simulating = False
+            time.sleep(0.05) # Pequeño margen para que muera el hilo
+
         if self.current_state != SystemState.AUTO_READY:
             self.logger.warning(f"Ejecucion denegada. Incompatibilidad de estado.")
             return False
@@ -449,6 +567,7 @@ class RobotController:
         return True
 
     
+    # AUTO_RUNNING -> AUTO_PAUSED
     def stop_trajectory(self) -> bool:
         """
         Solicita la pausa inmediata de la ejecucion.
@@ -461,6 +580,7 @@ class RobotController:
         return self._dispatch_command("M114", "Feed Hold / Pause")
     
 
+    # AUTO_PAUSED -> AUTO_RUNNING
     def resume_trajectory(self) -> bool:
         """
         Solicita reanudar la ejecucion desde el punto exacto de interrupcion.
@@ -472,6 +592,7 @@ class RobotController:
         return self._dispatch_command("M115", "Resume Trajectory")
     
 
+    # AUTO_PAUSED -> AUTO_READY
     def cancel_trajectory(self) -> bool:
         """
         Cancela la trayectoria pausada y limpia los buffers
@@ -523,6 +644,93 @@ class RobotController:
         #! NOTA. Para reanudar, se requiere secuencia estricta de reinicio. (ej M99)
 
 
+    def simulate_trajectory(self) -> bool:
+        """
+        Inicia el recorrido virtual de la trayectoria en la memoria.
+        """
+        if self.current_state != SystemState.AUTO_READY:
+            self.logger.warning("Simulación denegada: El sistema no está en AUTO_READY.")
+            return False
+
+        if getattr(self, 'active_trajectory', None) is None or self.active_trajectory.size == 0:
+            self.logger.warning("Simulación denegada: No hay trayectoria cargada.")
+            return False
+
+        # Si ya hay una simulación corriendo, la reiniciamos
+        if self._is_simulating:
+            self._is_simulating = False
+            if self._simulation_thread:
+                self._simulation_thread.join(timeout=0.5)
+
+        self.logger.info("Iniciando previsualización del Gemelo Digital...")
+        self._is_simulating = True
+        self._simulation_thread = threading.Thread(target=self._simulation_worker, daemon=True)
+        self._simulation_thread.start()
+        return True
+
+
+    def _simulation_worker(self) -> None:
+        """
+        Hilo dedicado a iterar la matriz sin bloquear el orquestador.
+        """
+        try:
+            total_points = len(self.active_trajectory)
+            # Asumimos que los datos se grabaron a 50Hz (0.02 segundos por punto)
+            dt = 0.02 
+
+            for i, point in enumerate(self.active_trajectory):
+                # Permite abortar la simulación a la mitad si el usuario hace clic en Ejecutar o cambia de modo
+                if not self._is_simulating:
+                    break
+
+                q1, q2, q3 = point[0], point[1], point[2]
+                valve, pump = bool(point[3]), bool(point[4])
+
+                # Asegura que siempre envie al menos 1% de progreso
+                progress = max(1, int(((i + 1) / total_points) * 100))
+
+                self.robot.update_state(q1, q2, q3)
+
+                # Notificamos a la UI inyectando las posiciones simuladas
+                if self.ui_update_callback:
+                    self.ui_update_callback(
+                        self.robot.get_cartesian_state(),
+                        [q1, q2, q3],
+                        self.current_state,
+                        {'valve': valve, 'pump': pump},
+                        progress
+                    )     
+                # Simulamos el paso del tiempo de la grabación
+                time.sleep(dt)
+
+            self.logger.info("Previsualización finalizada.")
+        
+        except Exception as e:
+            self.logger.error(f"Error durante simulación: {e}")
+        
+        finally:
+            # Apagamos el flag. En los próximos 20 milisegundos, la telemetría viva del 
+            # hardware volverá a entrar, el brazo "saltará" a la realidad, indicando 
+            # visualmente que la simulación terminó.
+            self._is_simulating = False
+
+    
+    def stop_simulation(self):
+        """
+        Detiene el hilo de simulación y limpia la UI.
+        """
+        self._is_simulating = False
+        self.logger.info("Simulación detenida por el usuario.")
+        # Enviamos un último callback con progreso 0 para limpiar la barra en la UI
+        if self.ui_update_callback:
+            self.ui_update_callback(
+                self.robot.get_cartesian_state(),
+                self.robot.get_joint_state(), # asumiendo que tienes este getter
+                self.current_state,
+                self.actuator_state,
+                0 # Reset progreso
+            )
+
     
     #COMANDOS AUXILIARES
     def _dispatch_command(self, cmd: str, action_desc: str = "") -> bool:
@@ -538,6 +746,10 @@ class RobotController:
         Retorno:
             * bool: True si se encolo correctamente, False si el buffer fallo
         """
+        if not self.is_connected:
+            self.logger.error(f"Imposible enviar comando. El sistema esta desconectado.")
+            return False
+        
         self.logger.debug(f"Condicion de guarda superada, enviando comando '{cmd}' ({action_desc}).")
         transmission_success = self.uart.send_message(cmd)
 
