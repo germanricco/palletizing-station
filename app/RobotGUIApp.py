@@ -11,7 +11,7 @@ import numpy as np
 import time
 
 from typing import Any
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtCore import QObject, Signal
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -19,26 +19,25 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 # Importaciones de la vista y estilos
 from app.views.main_window import MainWindow
 from app.resources.styles.style_manager import StyleManager
+from app.views.components.save_dialog import SaveTrajectoryDialog
 from control.robot_controller import RobotController, SystemState
 
 class SignalBridge(QObject):
-    """Puente de señales para garantizar la seguridad entre hilos."""
-    # Define la firma de los datos que enviará el controlador.
-    # * np.array: Matriz de telemetria con posiciones cartesiana
-    # * list: Lista de telemetria con angulos articulares
-    # * object: Objeto con el estado del sistema
-    # * dict: Objeto con el estado de actuadores
-    # * int: Progreso de la trayectoria 
-    telemetry_received = Signal(np.ndarray, list, object, dict, int)
+    """
+    Puente de señales para garantizar la seguridad entre hilos.
+    """
+    telemetry_received = Signal(np.ndarray, list, object, dict, int)    # telemetria
+    trajectory_loaded = Signal(str)      # trayectoria cargada, emite el nombre del archivo
+    prompt_save_requested = Signal(str)  # solicitar nombre de guardado
 
 
 
 class RobotGUIApp:
     """
     Clase principal que orquesta el ciclo de vida de la aplicación.
-    Instancia la UI, el backend y gestiona la inyección de dependencias.
     """
 
+    # ==== INICIALIZACION Y CONFIGURACION ====
     def __init__(self, app: QApplication, controller) -> None:
         """
         Inicializa los componentes principales de la arquitectura.
@@ -53,15 +52,15 @@ class RobotGUIApp:
 
         # Variables para Throttling (bajar fps)
         self._last_telemetry_time = 0.0
-        self._ui_refresh_rate = 1.0 / 20.0  # 20FPS es ideal
+        self._ui_refresh_rate = 1.0 / 20.0  # 20FPS
 
         # Memoria de Estados Criticos
         self._last_state_name = ""
-        self._last_progress = -1
+        self._last_progress = 0
+        self._last_actuators = {'valve': False, 'pump': False}
         
         self._apply_styles()
         self._setup_connections()
-
 
     def _setup_logging(self) -> None:
         """
@@ -80,37 +79,49 @@ class RobotGUIApp:
         """
         StyleManager.apply_base_palette(self.app)
 
+    
+    # ==== ENRUTAMIENTO DE SENALES (WIRING) ====
     def _setup_connections(self) -> None:
         """
         Enlaza los callbacks del backend con las señales de Qt y, a su vez,
         conecta estas señales a los métodos de actualización visual de MainWindow.
         """
-        # 1. Telemetria.
+        # --- Flujos de Alta Frecuencia (Backend -> UI) ---
+        # Telemetria y Cinematica
         self.controller.ui_update_callback = self._on_backend_telemetry_update
         self.bridge.telemetry_received.connect(self.window.update_dashboard)
 
-        # 2. Comandos Manuales.
-        self.window.terminal_widget.command_submitted.connect(
-            self.controller.send_manual_command
-        )
+        # Eventos Discretos de Memoria
+        self.controller.trajectory_loaded_callback = self._on_trajectory_loaded
+        self.bridge.trajectory_loaded.connect(self.window.control_panel_widget.update_loaded_file_name)
 
-        # 3. Panel de Control
+        self.controller.prompt_save_callback = self._on_prompt_save_requested
+        self.bridge.prompt_save_requested.connect(self._show_save_dialog)
+
+        # --- Eventos de Usuario (UI -> Backend)
+        # A. Terminal UART
+        self.window.terminal_widget.command_submitted.connect(self.controller.send_manual_command)
+
+        # B. Panel de Control
         panel = self.window.control_panel_widget
         
-        # Conexiones de comunicacion
+        # Comunicaciones
         panel.request_connection.connect(self._handle_connection_request)
 
-        # Conexiones de Modos
+        # Modos Logicos
         panel.request_mode_idle.connect(self.controller.request_idle_state)
         panel.request_mode_manual.connect(self.controller.request_manual_mode)
         panel.request_mode_auto.connect(self.controller.request_auto_ready)
 
-        # Conexiones de Memoria
+        # Jogging
+        panel.request_jog.connect(self.controller.execute_jog)
+
+        # Memoria
         panel.request_start_recording.connect(self.controller.start_recording)
         panel.request_stop_recording.connect(self.controller.stop_recording)
         panel.request_load_trajectory.connect(self.controller.load_trajectory)
         
-        # Conexiones de ejecucion de trayectoria
+        # Ejecucion de Trayectoria
         panel.request_execute_auto.connect(self.controller.execute_auto)
         panel.request_simulate_trajectory.connect(self.controller.simulate_trajectory)
         panel.request_stop_simulation.connect(self.controller.stop_simulation)
@@ -118,56 +129,80 @@ class RobotGUIApp:
         panel.request_resume_trajectory.connect(self.controller.resume_trajectory)
         panel.request_cancel_trajectory.connect(self.controller.cancel_trajectory)
 
-        # 4. Panel de Seguridad
+        # C. Panel de Seguridad
         safety = self.window.safety_panel_widget
         safety.request_e_stop.connect(self.controller.trigger_emergency_stop)
 
-        # (Si en el futuro agregas un método 'reset_emergency_stop' al backend, 
-        # puedes conectarlo aquí con: safety.request_e_reset.connect(self.controller.reset_emergency))
+        # Reinicio
+        #! safety.request_e_reset.connect(self.controller.reset_emergency)
+        
 
+    # ==== METODOS PUENTE (THREAD-SAFE WRAPPERS) ====
+    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict, progress=0) -> None:
+        """
+        Invocado por el hilo RX del AsyncUARTCommunicator. 
+        Cruza la barrera de hilos emitiendo la señal Qt.
+        """
+        now = time.time()
+        
+        state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
+        
+        # 1. Evaluacion de Bypass
+        is_critical_change = (
+            (state_name != self._last_state_name) or 
+            (actuator_state != self._last_actuators) or
+            (progress == 0 and self._last_progress > 0) or 
+            (progress > 0 and self._last_progress == 0)
+        )
+        
+        # 2. Puerta Logica
+        if is_critical_change or (now - self._last_telemetry_time) >= self._ui_refresh_rate:
+            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state, progress)
+            
+            # Actualizamos la memoria interna
+            self._last_telemetry_time = now
+            self._last_state_name = state_name
+            self._last_progress = progress
+            
+            # Copiamos el diccionario para evitar referencias en memoria
+            self._last_actuators = actuator_state.copy()
+
+    def _on_trajectory_loaded(self, filename: str) -> None:
+        """
+        Puente seguro: Recibe del backend y emite la señal hacia el hilo principal de la GUI.
+        """
+        self.bridge.trajectory_loaded.emit(filename)
+
+    def _on_prompt_save_requested(self, default_name: str) -> None:
+        """Puente para saltar al hilo principal de Qt."""
+        self.bridge.prompt_save_requested.emit(default_name)
+
+
+    # ==== GESTION DE EVENTOS COMPLEJOS Y CICLO ====
     def _handle_connection_request(self, request_connect: bool) -> None:
         """
         Actúa como intermediario entre la acción del botón en la UI 
         y el hardware serial en el backend.
         """
         if request_connect:
-            # Pide conexión al backend (esto bloqueará la UI brevemente según max_retries/delay)
-            success = self.controller.start_connection(max_retries=3, delay_seconds=1.0)
-            
-            # Se haya conectado o no, actualizamos el botón según la propiedad oficial del backend
-            self.window.control_panel_widget.set_connection_state(self.controller.is_connected)
+            # Pide conexión al backend
+            self.controller.start_connection(max_retries=3, delay_seconds=1.0)
         else:
-            # Pide desconexión
+            # Si no conecta, finaliza la comunicación
             self.controller.finish_connection()
-            self.window.control_panel_widget.set_connection_state(self.controller.is_connected)
+        self.window.control_panel_widget.set_connection_state(self.controller.is_connected)
 
-
-    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict, progress=0) -> None:
-        """
-        ATENCIÓN: Este método es llamado por el hilo RX del AsyncUARTCommunicator.
-        Su única responsabilidad es emitir la señal para cruzar al hilo principal.
-        """
-        now = time.time()
+    def _show_save_dialog(self, default_name: str) -> None:
+        """Abre la ventana modal y procesa la respuesta del usuario."""
+        # Se le pasa self.window como parent para que quede centrada
+        dialog = SaveTrajectoryDialog(default_filename=default_name, parent=self.window)
         
-        state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
-        
-        # 1. EVALUACIÓN DE BYPASS CRÍTICO
-        # ¿El estado general cambió? ¿O el progreso saltó a 0 (abortado) o a 1 (iniciado)?
-        is_critical_change = (
-            (state_name != self._last_state_name) or 
-            (progress == 0 and self._last_progress > 0) or 
-            (progress == 1 and self._last_progress == 0)
-        )
-        
-        # 2. PUERTA LÓGICA
-        # Pasa si es urgente (bypass) O si ya pasó el tiempo de refresco (throttling normal)
-        if is_critical_change or (now - self._last_telemetry_time) >= self._ui_refresh_rate:
-            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state, progress)
-            
-            # Actualizamos la memoria
-            self._last_telemetry_time = now
-            self._last_state_name = state_name
-            self._last_progress = progress
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # El usuario hizo clic en GUARDAR
+            self.controller.confirm_save_trajectory(dialog.get_filename(), save=True)
+        else:
+            # El usuario hizo clic en CANCELAR o cerró la ventana
+            self.controller.confirm_save_trajectory("", save=False)
 
     def run(self) -> None:
         """
@@ -175,13 +210,8 @@ class RobotGUIApp:
         """
         try:
             self.window.show()
-            #! Ver si agrego un inicio al controlador del Robot
             if hasattr(self.controller, 'start'):
                 self.controller.start()
-
-            elif hasattr(self.controller, 'uart') and not self.controller.uart.serial_conn:
-                # Opcional: Podrías mandar llamar connect() aquí si no lo hiciste en main.py
-                pass
 
         except Exception as e:
             logging.error(f"Fallo crítico al iniciar componentes: {e}")
@@ -189,10 +219,3 @@ class RobotGUIApp:
         
         sys.exit(self.app.exec())
 
-    
-
-
-if __name__ == "__main__":
-    # Punto de entrada estricto
-    gui_application = RobotGUIApp()
-    gui_application.run()

@@ -109,7 +109,7 @@ class DigitalTwin(QWidget):
         hud_right_layout.setSpacing(12)
 
         # Título Cinemática
-        lbl_kin_title = QLabel("CINEMÁTICA DIRECTA")
+        lbl_kin_title = QLabel("POSICION ACTUAL")
         lbl_kin_title.setStyleSheet(
             f"color: {AppConfig.COLORS.TEXT_MED};"
             f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"

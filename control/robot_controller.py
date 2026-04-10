@@ -12,9 +12,6 @@ from communication.async_uart import AsyncUARTCommunicator
 from control.trajectory_streamer import TrajectoryStreamer
 
 class SystemState(Enum):
-    """
-    Enumeracion de la Maquina de Estados.
-    """
     BOOT = "BOOT",
     INIT = "INIT",
     IDLE = "IDLE",
@@ -30,9 +27,8 @@ class SystemState(Enum):
 class RobotController:
     """
     Controlador Maestro del sistema robotico.
-    Orquesta la maquina de estados local, sincroniza la telemetria con el gemelo digital,
-    gestiona la persistencia y dirige el streaming de trayectorias.
     """
+    # ==== INICIALIZACION Y CICLO DE VIDA ====
     def __init__(self, port: str, baudrate: int = 115200, chunk_size: int = 15, log_level: int = logging.INFO):
         """
         Instancia y ensambla todos los subsistemas del controlador
@@ -48,51 +44,31 @@ class RobotController:
         self.logger = logging.getLogger("STM32_Controller.Orquestador")
         self.logger.info("Iniciando secuencia de arranque de RobotController...")
 
-        # Sistema inicia asumiendo que el hardware ha completado su boot y esta listo.
         self.current_state: SystemState= SystemState.INIT
+        self.recording_buffer: List[List[float]] = []   # Buffer dinamico en RAM para modo RECORDING
+        self._pending_save_matrix: Optional[np.ndarray] = None  # Cache para posponer el guardado de trayectoria
 
-        # Buffer dinamico en RAM para modo RECORDING
-        self.recording_buffer: List[List[float]] = []
-
-        # Callback expuesto para la actualización reactiva de la Interfaz de Usuario (UI)
-        self.ui_update_callback: Optional[Callable[[np.ndarray, SystemState], None]] = None
-
-        # COMPONENTES
-        # Repositorio de trayectorias
-        self.logger.debug("Instanciando capa de persistencia (TrajectoryRepository).")
+        # Componentes
         self.repository = TrajectoryRepository(storage_dir="trajectories")
-
-        # Gemelo Digital
-        self.logger.debug("Instanciando Gemelo Digital (RoboticArmMK2).")
         self.robot = RoboticArmMK2()
-
-        # Interfaz de Hardware
-        self.logger.debug("Configurando enlace UART en {port} @ {baudrate}")
         self.uart = AsyncUARTCommunicator(port=port, baudrate=baudrate)
-
-        # Gestor de Trayectorias
-        self.logger.debug("Instanciando TrajectoryStreamer con chunk_size={chunk_size}.")
         self.streamer = TrajectoryStreamer(comm=self.uart, chunk_size=chunk_size)
 
-        # Recepcion de callbacks del UART.
+        # Callback para la recepcion de mensajes serial
         self.uart.set_rx_callback(self._route_serial_message)
 
-        # Atributo para rastrear el estado discreto de la herramienta final
-        self.actuator_state = {
-            'valve': False,
-            'pump': False
-        }
+        self.actuator_state = {'valve': False, 'pump': False}
 
+        # Callbacks
         self.ui_update_callback = None
+        self.prompt_save_callback: Optional[Callable[[str], None]] = None
 
         # Variables para simulacion
         self.active_trajectory = None
         self._is_simulating = False
         self._simulation_thread = None
 
-
         self.logger.info("RobotController ensamblado con exito. Estado actual: {self.current_state.value}.")
-    
     
     @property
     def is_connected(self) -> bool:
@@ -101,8 +77,6 @@ class RobotController:
         """
         return self.uart._running and self.uart.serial_conn is not None and self.uart.serial_conn.is_open
     
-
-    # INIT -> IDLE
     def start_connection(self, max_retries: int = 3, delay_seconds: float = 1.0) -> bool:
         """
         Intenta establecer la conexion UART con el microcontrolador
@@ -143,8 +117,6 @@ class RobotController:
         self._change_internal_state(SystemState.INIT)
         return False
     
-
-    # ANY -> INIT
     def finish_connection(self) -> None:
         """
         Cierra la conexión UART de forma segura, aborta operaciones en curso 
@@ -177,7 +149,7 @@ class RobotController:
         self.logger.info("Desconexión finalizada de manera segura. Sistema Offline.")
 
 
-    # GESTION DE EVENTOS. LOS VA DIRIGIENDO DONDE SEAN NECESARIOSss
+    # ==== ENRUTAMIENTO Y PARESO UART (RX) ====
     def _route_serial_message(self, raw_message: str) -> None:
         """
         Enrutador Central. Todo lo que llega del STM32 pasa por este metodo.
@@ -214,8 +186,6 @@ class RobotController:
         except Exception as e:
             self.logger.error(f"Error procesando mensaje RX '{raw_message}': {e}")
 
-    
-    # PROCESA TELEMETRIA A 50HZ Y ACTUALIZA robot + UI
     def _handle_telemetry(self, data_str: str) -> None:
         """
         Procesa la trama de telemetria asincrona a 50Hz.
@@ -268,8 +238,6 @@ class RobotController:
         except Exception as e:
             self.logger.error(f"Fallo critico no gestionado en pipeline de telemetria: {e}")
 
-
-    #! COMPLETAR
     def _handle_async_event(self, event_msg: str) -> None:
         """
         Enrutador para eventos iniciados por el microcontrolador.
@@ -289,7 +257,6 @@ class RobotController:
         else:
             self.logger.warning(f"Evento de hardware no reconocido: {event_msg}")
 
-
     def _handle_state_ack(self, ack_msg: str) -> None:
         """
         Mapea los codigos de confirmacion del STM32 a la enumeracion 
@@ -298,6 +265,7 @@ class RobotController:
             ack_msg: Codigo de confirmacion de comando
         """
         mapping = {
+            "ACK_M98": SystemState.INIT,
             "ACK_M99": SystemState.IDLE,
             "ACK_M100": SystemState.MANUAL,
             "ACK_M101": SystemState.AUTO_READY,
@@ -321,7 +289,7 @@ class RobotController:
             self.logger.warning(f"ACK de estado desconocido o no gestionado: {ack_msg}.")
 
     
-    # ACTUALIZA EL ESTADO INTERNO
+    # ==== MAQUINA DE ESTADOS (STATE MANAGER) ====
     def _change_internal_state(self, new_state: SystemState) -> None:
         """
         Actualiza el estado actual, gestionando transiciones logicas y notifica a la UI.
@@ -337,11 +305,16 @@ class RobotController:
             self.logger.debug("Finalizando grabacion. Procesando datos.")
 
             if len(self.recording_buffer) > 0:
-                # Se delega el guardado al TrajectoryRepository.
-                matrix_to_save = np.array(self.recording_buffer, dtype=np.float32)
-                filename = f"record_{int(time.time())}"
-                self.repository.save_trajectory(filename, matrix_to_save)
-                self.logger.info(f"Trayectoria '{filename}' guardada exitosamente. Shape: {matrix_to_save.shape}.")
+                # 1. Cachamos la matriz en RAM
+                self._pending_save_matrix = np.array(self.recording_buffer, dtype=np.float32)
+                default_filename = f"record_{int(time.time())}"
+
+                # 2. Solicitamos a la UI que pregunte que hacer
+                if self.prompt_save_callback is not None:
+                    self.prompt_save_callback(default_filename)
+                else:
+                    # Si la UI se desconecto que se guarde por defecto
+                    self.confirm_save_trajectory(default_filename, save=True)
             else:
                 self.logger.warning("No se recopilaron datos.")
 
@@ -365,11 +338,7 @@ class RobotController:
         self.logger.info(f"Sistema en modo: {self.current_state.value}.")
 
 
-    # RECIBE UN EVENTO DE ESTADO DEL STM32
-    def _handle_state_event(self, event: str) -> None:
-        pass
-
-
+    # ==== COMANDOS DE USUARIO Y JOGGING (TX) ====
     def send_manual_command(self, raw_command: str) -> bool:
         """
         Procesa comandos de texto libre ingresados por el usuario desde GUI.
@@ -422,9 +391,53 @@ class RobotController:
 
         # 4. Despacho seguro al hardware
         return self._dispatch_command(cmd_full, "Inyección manual desde GUI")
-
     
-    # MANUAL/AUTO_READY/INIT -> IDLE
+    def execute_jog(self, mode: str, axis: int, step: float) -> bool:
+        """
+        Enruta la solicitud de movimiento iterativo de la UI al hardware o cinamatica
+        """
+        if self.current_state != SystemState.AUTO_READY:
+            self.logger.warning("Jogging denegado. El sistema debe estar en AUTO_READY.")
+            return False
+        
+        # TODO: Implementar lógica de cinemática inversa si mode == "CARTESIANO"
+        # y generar la trama G-Code correspondiente para inyectar en _dispatch_command
+        self.logger.info(f"Comando Jogging Recibido: Modo={mode}, Eje={axis}, Paso={step}")
+        return True
+
+    def _dispatch_command(self, cmd: str, action_desc: str = "") -> bool:
+        """
+        Centraliza el despacho asincrono de comandos UART y la validacion de la
+        capa de transporte.
+        (PRINCIPIO DRY Dont-Repeat-Yourself)
+
+        Parametros:
+            * cmd: Comando a enviar
+            * action_desc: Descripcion legible para el registro de logs.
+
+        Retorno:
+            * bool: True si se encolo correctamente, False si el buffer fallo
+        """
+        if not self.is_connected:
+            self.logger.error(f"Imposible enviar comando. El sistema esta desconectado.")
+            return False
+        
+        self.logger.debug(f"Condicion de guarda superada, enviando comando '{cmd}' ({action_desc}).")
+        transmission_success = self.uart.send_message(cmd)
+
+        if not transmission_success:
+            self.logger.error(f"Fallo de comunicacion TX: Buffer saturado al intentar enviar {cmd}.")
+            return False
+        
+        self.logger.info(f"Comando {cmd} despachado. Aguardando confirmación...")
+        return True
+
+    def _handle_state_event(self, event: str) -> None:
+        pass
+    # Si mandas EVT: S1_ACTIVE
+
+
+    # ==== TRANSICIONES DE MODOS LOGICOS ====
     def request_idle_state(self) -> bool:
         """
         Solicita al microcontrolador la transicion al estado IDLE.
@@ -443,8 +456,6 @@ class RobotController:
         
         return self._dispatch_command("M99", "Soft Homing / IDLE")
 
-
-    # IDLE -> MANUAL
     def request_manual_mode(self) -> bool:
         """
         Solicita al microcontrolador la transicion al modo de operacion MANUAL.
@@ -461,8 +472,6 @@ class RobotController:
         
         return self._dispatch_command("M100", "Enable Manual Mode")
 
-    
-    # MANUAL -> RECORDING
     def start_recording(self) -> bool:
         """
         Solicita al microcontrolador la transicion al modo RECORDING
@@ -479,8 +488,6 @@ class RobotController:
         
         return self._dispatch_command("M110", "Start Recording")
 
-
-    # RECORDING -> MANUAL (SALIDA CON PERSISTENCIA)
     def stop_recording(self) -> bool:
         """
         Solicita al microcontrolador finalizar la sesion de grabacion actual.
@@ -497,8 +504,6 @@ class RobotController:
         
         return self._dispatch_command("M111", "Stop Recording")
         
-
-    # IDLE -> AUTO_READY
     def request_auto_ready(self) -> bool:
         """
         Solicita la habilitacion del modo de reproduccion automatica.
@@ -514,6 +519,25 @@ class RobotController:
         
         return self._dispatch_command("M101", "Enable Auto Mode")
 
+
+    # ==== GESTION DE TRAYECTORIAS EN MEMORIA ====
+    def confirm_save_trajectory(self, filename: str, save: bool) -> None:
+        """
+        Invocado por la UI luego de que el usuario toma una decisión en el diálogo.
+        O automaticamente por seguridad si la UI se desconecta inesperadamente.
+        """
+        if not save or self._pending_save_matrix is None:
+            self.logger.info("Grabación descartada por el usuario (o matriz vacía).")
+            self._pending_save_matrix = None # Liberar RAM
+            return
+        
+        # Si el usuario dejó el campo vacío, usamos un default
+        if not filename:
+            filename = f"record_{int(time.time())}"
+
+        self.repository.save_trajectory(filename, self._pending_save_matrix)
+        self.logger.info(f"Trayectoria '{filename}' guardada exitosamente.")
+        self._pending_save_matrix = None # Liberar RAM
 
     def load_trajectory(self, trajectory_name: str) -> bool:
         """
@@ -537,12 +561,13 @@ class RobotController:
         self.active_trajectory = matrix
         self.logger.info(f"Trayectoria '{trajectory_name}' cargada exitosamente. Cant. de puntos: {self.active_trajectory.shape[0]}")
 
-        #! NOTA. ACA SE PUEDE INVOCAR CALLBACK AUXILIAR
-        #! PARA QUE SE RENDERICE LA TRAYECTORIA PROYECTADA EN ROJO
+        # Invocacion de callback hacia UI para notificar que la trayectorai esta cargada.
+        if self.trajectory_loaded_callback is not None:
+            # Enviamos el nombre del archivo (puedes enviar también la matriz si quieres dibujar la línea proyectada en rojo)
+            self.trajectory_loaded_callback(trajectory_name)
+
         return True
 
-
-    # AUTO_READY -> AUTO_RUNNING
     def execute_auto(self) -> bool:
         """
         Delega la ejecución de la matriz cacheada al TrajectoryStreamer.
@@ -566,8 +591,6 @@ class RobotController:
         self.streamer.start_streaming(self.active_trajectory)
         return True
 
-    
-    # AUTO_RUNNING -> AUTO_PAUSED
     def stop_trajectory(self) -> bool:
         """
         Solicita la pausa inmediata de la ejecucion.
@@ -579,8 +602,6 @@ class RobotController:
         
         return self._dispatch_command("M114", "Feed Hold / Pause")
     
-
-    # AUTO_PAUSED -> AUTO_RUNNING
     def resume_trajectory(self) -> bool:
         """
         Solicita reanudar la ejecucion desde el punto exacto de interrupcion.
@@ -591,8 +612,6 @@ class RobotController:
 
         return self._dispatch_command("M115", "Resume Trajectory")
     
-
-    # AUTO_PAUSED -> AUTO_READY
     def cancel_trajectory(self) -> bool:
         """
         Cancela la trayectoria pausada y limpia los buffers
@@ -604,46 +623,7 @@ class RobotController:
         return self._dispatch_command("M113", "Cancel Trajectory")
     
 
-    # GESTION DE SEGURIDAD Y EMERGENCIAS
-    def trigger_emergency_stop(self) -> None:
-        """
-        Inicia la secuencia de Parada de Emergencia desde el Host (UI)
-        Emite el comando de maxima prioridad y fuerza el bloqueo sin esperar confirmacion.
-        """
-        self.logger.info("Emitiendo comando de parada de emergencia de hardware.")
-
-        # Inyeccion del comando a la cola de transmision
-        transmission_success = self.uart.send_message("M00")
-
-        if not transmission_success:
-            self.logger.error("FALLO CATASTROFICO. Buffer UART colapsado. Imposible emitir M00.")
-
-        # Bloqueo incondicional de la maquina de estados local
-        self._force_emergency_stop("Activacion de emergencia por software.")
-
-        
-    def _force_emergency_stop(self, reason: str) -> None:
-        """
-        Bloquea el orquestador, purga operaciones y notifica la anomalia
-        """
-        self.logger.critical(f"SISTEMA BLOQUEADO. Motivo {reason}")
-
-        # Bloqueo de maquina de Estados
-        if self.current_state != SystemState.EMERGENCY:
-            self._change_internal_state(SystemState.EMERGENCY)
-
-        # Cascada de Abortos: TrajectoryStreamer
-        self.logger.warning("Abortando inyeccion asincrona de trayectoria")
-        self.streamer.reset()
-
-        # Cascada de Aborto: Datos Volatiles
-        if len(self.recording_buffer) > 0:
-            self.logger.warning("Purgando bufer de grabacion. Datos descartados.")
-            self.recording_buffer.clear()
-
-        #! NOTA. Para reanudar, se requiere secuencia estricta de reinicio. (ej M99)
-
-
+    # ==== SIMULACION DE TRAYECTORIAS ====
     def simulate_trajectory(self) -> bool:
         """
         Inicia el recorrido virtual de la trayectoria en la memoria.
@@ -667,7 +647,6 @@ class RobotController:
         self._simulation_thread = threading.Thread(target=self._simulation_worker, daemon=True)
         self._simulation_thread.start()
         return True
-
 
     def _simulation_worker(self) -> None:
         """
@@ -714,7 +693,6 @@ class RobotController:
             # visualmente que la simulación terminó.
             self._is_simulating = False
 
-    
     def stop_simulation(self):
         """
         Detiene el hilo de simulación y limpia la UI.
@@ -731,31 +709,40 @@ class RobotController:
                 0 # Reset progreso
             )
 
-    
-    #COMANDOS AUXILIARES
-    def _dispatch_command(self, cmd: str, action_desc: str = "") -> bool:
+    # ==== SEGURIDAD Y EMERGENCIAS ====
+    def trigger_emergency_stop(self) -> None:
         """
-        Centraliza el despacho asincrono de comandos UART y la validacion de la
-        capa de transporte.
-        (PRINCIPIO DRY Dont-Repeat-Yourself)
-
-        Parametros:
-            * cmd: Comando a enviar
-            * action_desc: Descripcion legible para el registro de logs.
-
-        Retorno:
-            * bool: True si se encolo correctamente, False si el buffer fallo
+        Inicia la secuencia de Parada de Emergencia desde el Host (UI)
+        Emite el comando de maxima prioridad y fuerza el bloqueo sin esperar confirmacion.
         """
-        if not self.is_connected:
-            self.logger.error(f"Imposible enviar comando. El sistema esta desconectado.")
-            return False
-        
-        self.logger.debug(f"Condicion de guarda superada, enviando comando '{cmd}' ({action_desc}).")
-        transmission_success = self.uart.send_message(cmd)
+        self.logger.info("Emitiendo comando de parada de emergencia de hardware.")
+
+        # Inyeccion del comando a la cola de transmision
+        transmission_success = self.uart.send_message("M00")
 
         if not transmission_success:
-            self.logger.error(f"Fallo de comunicacion TX: Buffer saturado al intentar enviar {cmd}.")
-            return False
-        
-        self.logger.info(f"Comando {cmd} despachado. Aguardando confirmación...")
-        return True
+            self.logger.error("FALLO CATASTROFICO. Buffer UART colapsado. Imposible emitir M00.")
+
+        # Bloqueo incondicional de la maquina de estados local
+        self._force_emergency_stop("Activacion de emergencia por software.")
+
+    def _force_emergency_stop(self, reason: str) -> None:
+        """
+        Bloquea el orquestador, purga operaciones y notifica la anomalia
+        """
+        self.logger.critical(f"SISTEMA BLOQUEADO. Motivo {reason}")
+
+        # Bloqueo de maquina de Estados
+        if self.current_state != SystemState.EMERGENCY:
+            self._change_internal_state(SystemState.EMERGENCY)
+
+        # Cascada de Abortos: TrajectoryStreamer
+        self.logger.warning("Abortando inyeccion asincrona de trayectoria")
+        self.streamer.reset()
+
+        # Cascada de Aborto: Datos Volatiles
+        if len(self.recording_buffer) > 0:
+            self.logger.warning("Purgando bufer de grabacion. Datos descartados.")
+            self.recording_buffer.clear()
+
+        #! NOTA. Para reanudar, se requiere secuencia estricta de reinicio. (ej M99)

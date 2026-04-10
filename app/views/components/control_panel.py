@@ -1,7 +1,5 @@
 """
 Módulo del componente Panel de Control (Control Panel).
-Contiene la estructura base para la interfaz de operación, dividida en
-comunicaciones, modos lógicos, jogging de GDL y gestión de trayectorias.
 """
 
 import os
@@ -27,8 +25,6 @@ from app.views.components.jogging_card import JoggingCard
 class ControlPanel(QWidget):
     """
     Widget principal del Panel de Control.
-    Estructura dinámicamente las zonas de interacción del operador
-    utilizando proporciones (stretch factors).
     """
 
     # --- SENALES HACIA EL BACKEND ---
@@ -57,12 +53,11 @@ class ControlPanel(QWidget):
     request_jog = Signal(str, int, float)
 
 
+    # ==== INICIALIZACION Y LAYOUT MAESTRO ====
     def __init__(self, parent: QWidget | None = None) -> None:
         """Inicializa el Panel de Control y su layout estructural."""
         super().__init__(parent)
         self.setObjectName("ControlPanelWidget")
-        
-        # Habilitar el renderizado de estilos QSS en el QWidget base
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             f"ControlPanel {{"
@@ -70,8 +65,8 @@ class ControlPanel(QWidget):
             f"}}"
         )
         
-        self._is_connected = False # Estado logico interno de la UI
-        self._jog_mode = "ARTICULAR"  # Estado del sistema de coordenadas
+        self._is_connected = False      # Estado logico interno de la UI
+        self._jog_mode = "ARTICULAR"    # Estado del sistema de coordenadas
 
         self._setup_ui()
 
@@ -85,26 +80,26 @@ class ControlPanel(QWidget):
         layout.setContentsMargins(spacing_sm, spacing_sm, spacing_sm, spacing_sm)
         layout.setSpacing(int(AppConfig.SPACING.MD.replace("px", "")))
 
-        # 1. Cabecera Sistema y Comunicaciones (~10%)
+        # Cabecera Sistema y Comunicaciones
         self.frame_comms = self._create_communication_section()
-        
-        # 2. Selección de Modos Lógicos (~15%)
+
+        # Selección de Modos Lógicos
         self.frame_modes = self._create_modes_section()
 
-        # 3. Tarjetas de Teleoperación / Jogging 3 GDL (~50%)
+        # Tarjetas de Teleoperación / Jogging 3 GDL
         self.frame_jogging = self._create_jogging_section()
-        
-        # 4. Gestión de Trayectorias y Memoria (~25%)
+
+        # Gestión de Trayectorias y Memoria
         self.frame_memory = self._create_memory_section()
 
-        # Inserción en el Layout Padre con los Stretch Factors del Design Handoff
+        # Inserción en el Layout Principal
         layout.addWidget(self.frame_comms, stretch=10)
         layout.addWidget(self.frame_modes, stretch=15)
         layout.addWidget(self.frame_jogging, stretch=50)
         layout.addWidget(self.frame_memory, stretch=25)
 
-
-
+    
+    # ==== CREADORES DE SECCIONES (BUILDERS) ====
     def _create_communication_section(self) -> QFrame:
         """
         Construye el bloque de comunicaciones con el semáforo de estado 
@@ -148,142 +143,6 @@ class ControlPanel(QWidget):
         
         return frame
     
-    def _on_toggle_clicked(self) -> None:
-        """Slot interno que emite la intención del usuario hacia el orquestador."""
-        # Si NO estamos conectados, solicitamos conexión (True), y viceversa.
-        self.request_connection.emit(not self._is_connected)
-
-    def set_connection_state(self, is_connected: bool) -> None:
-        """
-        API Pública para actualizar visualmente el estado de comunicación.
-        Implementa los estilos dinámicos del Design Handoff.
-        """
-        self._is_connected = is_connected
-
-        if is_connected:
-            # Estado: CONECTADO (Verde y Cian)
-            self.lbl_conn_icon.setStyleSheet(f"color: {AppConfig.COLORS.SEMANTIC_AUTO}; font-size: 16px; border: none; background: transparent;")
-            self.lbl_conn_text.setStyleSheet(f"color: {AppConfig.COLORS.TEXT_HIGH}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; border: none; background: transparent;")
-            self.lbl_conn_text.setText("ESTADO: ONLINE")
-            
-            self.btn_toggle_conn.setText("ENLACE SERIAL ACTIVO")
-            self.btn_toggle_conn.setStyleSheet(
-                f"background-color: rgba(0, 240, 255, 0.1);"
-                f"border: 1px solid {AppConfig.COLORS.SEMANTIC_MANUAL};"
-                f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};"
-                f"border-radius: 4px;"
-                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
-                f"font-weight: bold;"
-            )
-        else:
-            # Estado: DESCONECTADO (Rojo y Gris)
-            self.lbl_conn_icon.setStyleSheet(f"color: {AppConfig.COLORS.SEMANTIC_ESTOP}; font-size: 16px; border: none; background: transparent;")
-            self.lbl_conn_text.setStyleSheet(f"color: {AppConfig.COLORS.TEXT_MED}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; border: none; background: transparent;")
-            self.lbl_conn_text.setText("ESTADO: OFFLINE")
-
-            self.btn_toggle_conn.setText("CONECTAR STM32")
-            self.btn_toggle_conn.setStyleSheet(
-                f"background-color: #2A2A2A;"
-                f"border: 1px solid {AppConfig.COLORS.BORDERS};"
-                f"color: #8E8E93;"
-                f"border-radius: 4px;"
-                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
-                f"font-weight: bold;"
-            )
-
-
-    # METODOS RELACIONAS A JOGGING
-    def _create_jogging_section(self) -> QWidget:
-        """Estructura la sección de Jogging con su cabecera y tarjetas."""
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-
-        # --- HEADER (Título y Botón Toggle de Modo) ---
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        
-        lbl_section = QLabel("TELEOPERACIÓN")
-        lbl_section.setStyleSheet(
-            f"color: {AppConfig.COLORS.TEXT_HIGH};"
-            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
-            f"font-size: 16px;"
-            f"font-weight: {AppConfig.TYPOGRAPHY.WEIGHT_BOLD};"
-        )
-        
-        self.btn_jog_mode = QPushButton("MODO: ARTICULAR")
-        self.btn_jog_mode.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_jog_mode.setFixedHeight(28)
-        self.btn_jog_mode.setStyleSheet(self._get_jog_btn_style("ARTICULAR"))
-        self.btn_jog_mode.clicked.connect(self._on_toggle_jog_mode)
-
-        header_layout.addWidget(lbl_section)
-        header_layout.addStretch()
-        header_layout.addWidget(self.btn_jog_mode)
-
-        # --- TARJETAS ---
-        self.cards = [
-            JoggingCard(axis_id=0),
-            JoggingCard(axis_id=1),
-            JoggingCard(axis_id=2)
-        ]
-
-        # Conectar señales enrutándolas por el ID y adjuntando el modo actual
-        for i, card in enumerate(self.cards):
-            card.request_step.connect(lambda step, axis=i: self.request_jog.emit(self._jog_mode, axis, step))
-            layout.addWidget(card)
-        
-        layout.addLayout(header_layout)
-        # Reordenamos: Insertamos el header al principio del layout vertical
-        layout.insertLayout(0, header_layout)
-        
-        layout.addStretch()
-        return container
-
-    def _get_jog_btn_style(self, mode: str) -> str:
-        """Retorna el estilo dinámico para el botón de toggle de coordenadas."""
-        base_color = AppConfig.COLORS.SEMANTIC_RECORD if mode == "ARTICULAR" else AppConfig.COLORS.SEMANTIC_MANUAL
-        return (
-            f"QPushButton {{"
-            f"  background-color: transparent;"
-            f"  color: {base_color};"
-            f"  border: 1px solid {base_color};"
-            f"  border-radius: 14px;"
-            f"  padding: 0px 12px;"
-            f"  font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
-            f"  font-size: 12px;"
-            f"  font-weight: bold;"
-            f"}}"
-            f"QPushButton:hover {{"
-            f"  background-color: {AppConfig.COLORS.SURFACE};"
-            f"}}"
-        )
-
-    def _on_toggle_jog_mode(self) -> None:
-        """Cambia el sistema de coordenadas y actualiza la UI."""
-        self._jog_mode = "CARTESIANO" if self._jog_mode == "ARTICULAR" else "ARTICULAR"
-        
-        self.btn_jog_mode.setText(f"MODO: {self._jog_mode}")
-        self.btn_jog_mode.setStyleSheet(self._get_jog_btn_style(self._jog_mode))
-        
-        for card in self.cards:
-            card.set_mode(self._jog_mode)
-
-    # --- API PÚBLICA PARA EL CONTROLADOR CENTRAL ---
-    def update_telemetry(self, joints: list[float], tcp: list[float]) -> None:
-        """
-        Alimenta las tarjetas con los datos del hardware, 
-        filtrando según el modo activo.
-        """
-        data_source = joints if self._jog_mode == "ARTICULAR" else tcp
-        
-        if len(data_source) >= 3:
-            for i in range(3):
-                self.cards[i].update_value(data_source[i])
-
-
-    # METODOS RELACIONADOS A SECCION DE MODOS
     def _create_modes_section(self) -> QWidget:
         """
         Crea la fila de botones agrupados horizontalmente para la seleccion de modos
@@ -314,6 +173,178 @@ class ControlPanel(QWidget):
         self._apply_inactive_styles()
 
         return container
+
+    def _create_jogging_section(self) -> QWidget:
+        """Estructura la sección de Jogging con su cabecera y tarjetas."""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        # --- HEADER (Título y Botón Toggle de Modo) ---
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        lbl_section = QLabel("TELEOPERACIÓN")
+        lbl_section.setStyleSheet(
+            f"color: {AppConfig.COLORS.TEXT_HIGH};"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+            f"font-size: 16px;"
+            f"font-weight: {AppConfig.TYPOGRAPHY.WEIGHT_BOLD};"
+        )
+        
+        self.btn_jog_mode = QPushButton("MODO: ARTICULAR")
+        self.btn_jog_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_jog_mode.setFixedHeight(28)
+        self.btn_jog_mode.setStyleSheet(self._get_jog_btn_style("ARTICULAR"))
+        self.btn_jog_mode.clicked.connect(self._on_toggle_jog_mode)
+
+        header_layout.addWidget(lbl_section)
+        header_layout.addStretch()
+        header_layout.addWidget(self.btn_jog_mode)
+
+        # Agregamos header al layout principal
+        layout.addLayout(header_layout)
+
+        # --- TARJETAS ---
+        self.cards = [
+            JoggingCard(axis_id=0),
+            JoggingCard(axis_id=1),
+            JoggingCard(axis_id=2)
+        ]
+
+        # Conectar señales enrutándolas por el ID y adjuntando el modo actual
+        for i, card in enumerate(self.cards):
+            card.request_step.connect(lambda step, axis=i: self.request_jog.emit(self._jog_mode, axis, step))
+            layout.addWidget(card)
+        
+        # Empuja todo hacia arriba si sobra espacion en la seccion
+        layout.addStretch()
+        return container
+
+    def _create_memory_section(self) -> QWidget:
+        """
+        Crea la seccion de gestion de trayectorias.
+        Implementa una cabecera de estado y una cuadricula 2x2 para las acciones
+        """
+        container = QWidget()
+        main_layout = QVBoxLayout(container)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(12)
+
+        # Cabecera de Estado (Feedback)
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+
+        lbl_section = QLabel("MEMORIA Y EJECUCIÓN")
+        lbl_section.setStyleSheet(
+            f"color: {AppConfig.COLORS.TEXT_MED};"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+            f"font-size: 12px;"
+            f"font-weight: bold;"
+        )
+        
+        # Etiqueta dinamica que se actualiza al cargar un archivo
+        self.lbl_loaded_file = QLabel("ARCHIVO: [ NINGUNO ]")
+        self.lbl_loaded_file.setStyleSheet(
+            f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
+            f"font-size: 12px;"
+        )
+        
+        header_layout.addWidget(lbl_section)
+        header_layout.addStretch()
+        header_layout.addWidget(self.lbl_loaded_file)
+
+        # --- Cuadricula de Acciones ---
+        grid_widget = QWidget()
+        layout = QGridLayout(grid_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        # --- FILA 1, COLUMNA 0: Stack de grabacion
+        self.stack_record = QStackedWidget()
+
+        self.btn_record = self._create_button("GRABAR TRAY.", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, "#FF9500")
+        self.btn_stop_record = self._create_button("TERMINAR GRAB.", "#FF9500", "#121212", "none")
+
+        self.btn_record.clicked.connect(self.request_start_recording.emit)
+        self.btn_stop_record.clicked.connect(self.request_stop_recording.emit)
+
+        self.stack_record.addWidget(self.btn_record)
+        self.stack_record.addWidget(self.btn_stop_record)
+
+        # --- FILA 1, COLUMNA 1: Botón Cargar Trayectoria
+        self.btn_load = self._create_button("CARGAR TRAY.", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, AppConfig.COLORS.BORDERS)
+        self.btn_load.clicked.connect(self._on_load_clicked)
+
+        # --- FILA 2, COLUMNA 0: Stack de Simulacion y Cancelacion ---
+        self.stack_abort = QStackedWidget()
+        
+        # Índice 0: Botón SIMULAR (Cian)
+        self.btn_simulate = self._create_button("SIMULAR", "#1A1A1A", "#00F0FF", "#00F0FF")
+        self.btn_simulate.clicked.connect(self.request_simulate_trajectory.emit)
+        
+        # Índice 1: Botón DETENER SIMULACIÓN (Estado SIMULANDO)
+        self.btn_stop_sim = self._create_button("DETENER SIM.", "#2A2A2A", "#FF3B30", "#FF3B30")
+        self.btn_stop_sim.clicked.connect(self.request_stop_simulation.emit)
+
+        # Índice 2: Botón Cancelar activo (Solo cuando está pausado)
+        self.btn_cancel = self._create_button("CANCELAR", "#2A2A2A", "#FF3B30", "#FF3B30")
+        self.btn_cancel.clicked.connect(self.request_cancel_trajectory.emit)
+        
+        self.stack_abort.addWidget(self.btn_simulate)   # 0
+        self.stack_abort.addWidget(self.btn_stop_sim)   # 1
+        self.stack_abort.addWidget(self.btn_cancel)     # 2
+
+        # --- FILA 2, COLUMNA 1: Stack de Ejecución ---
+        self.stack_execute = QStackedWidget()
+        
+        # Índice 0: Ejecutar (Verde)
+        self.btn_execute = self._create_button("EJECUTAR", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, "#34C759")
+        self.btn_execute.clicked.connect(self.request_execute_auto.emit)
+        
+        # Índice 1: Pausar (Ambar)
+        self.btn_pause = self._create_button("PAUSAR", "#2A2A2A", "#FF9500", "#FF9500")
+        self.btn_pause.clicked.connect(self.request_pause_trajectory.emit)
+        
+        # Índice 2: Reanudar (Verde)
+        self.btn_resume = self._create_button("REANUDAR", "#1E1E1E", {AppConfig.COLORS.TEXT_HIGH}, "#34C759")
+        self.btn_resume.clicked.connect(self.request_resume_trajectory.emit)
+        
+        self.stack_execute.addWidget(self.btn_execute)
+        self.stack_execute.addWidget(self.btn_pause)
+        self.stack_execute.addWidget(self.btn_resume)
+
+        # Configuramos políticas para que todos llenen su celda
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        for w in [self.stack_record, self.btn_load, self.stack_abort, self.stack_execute]:
+            w.setSizePolicy(policy)
+
+        # Ensamblaje del Grid
+        layout.addWidget(self.stack_record, 0, 0)
+        layout.addWidget(self.btn_load, 0, 1)
+        layout.addWidget(self.stack_abort, 1, 0)
+        layout.addWidget(self.stack_execute, 1, 1)
+
+        # Ensamblaje Final
+        main_layout.addLayout(header_layout)
+        main_layout.addWidget(grid_widget, stretch=1)
+
+        return container
+
+
+    # ==== UTILIDADES Y ESTILOS UI (HELPERS) ====
+    def _create_button(self, text: str, bg_color: str, text_color: str, border_color: str) -> QPushButton:
+        """Helper para generar botones con estilos estandarizados y reducir código repetitivo."""
+        btn = QPushButton(text)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        border = "none" if border_color == "none" else f"1px solid {border_color}"
+        btn.setStyleSheet(
+            f"background-color: {bg_color}; color: {text_color}; "
+            f"border: {border}; border-radius: 4px; font-weight: bold;"
+        )
+        return btn
     
     def _apply_inactive_styles(self) -> None:
         """Aplica el estilo base (inactivo) a todos los botones de modo."""
@@ -330,114 +361,42 @@ class ControlPanel(QWidget):
         self.btn_manual.setStyleSheet(base_style)
         self.btn_auto.setStyleSheet(base_style)
 
+    def _get_jog_btn_style(self, mode: str) -> str:
+        """Retorna el estilo dinámico para el botón de toggle de coordenadas."""
+        base_color = AppConfig.COLORS.SEMANTIC_RECORD if mode == "ARTICULAR" else AppConfig.COLORS.SEMANTIC_MANUAL
+        return (
+            f"QPushButton {{"
+            f"  background-color: transparent;"
+            f"  color: {base_color};"
+            f"  border: 1px solid {base_color};"
+            f"  border-radius: 14px;"
+            f"  padding: 0px 12px;"
+            f"  font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+            f"  font-size: 12px;"
+            f"  font-weight: bold;"
+            f"}}"
+            f"QPushButton:hover {{"
+            f"  background-color: {AppConfig.COLORS.SURFACE};"
+            f"}}"
+        )
+
+    def _set_button_enabled(self, btn: QPushButton, enabled: bool) -> None:
+        """
+        Activa o desactiva un botón y actualiza su opacidad visualmente.
+        Limpia estados previos para evitar acumulación de estilos.
+        """
+        btn.setEnabled(enabled)
+        # Limpiamos cualquier opacidad previa
+        base_style = btn.styleSheet().replace(" opacity: 0.5;", "")
+        
+        # Aplicamos la opacidad solo si está deshabilitado
+        if not enabled:
+            base_style += " opacity: 0.5;"
+            
+        btn.setStyleSheet(base_style)
+
     
-    # METODOS RELACIONADOS A SECCION DE TRAYECTORIAS Y MEMORIAS
-    def _create_memory_section(self) -> QWidget:
-        """Crea la cuadrícula 2x2 para gestión de trayectorias."""
-        container = QWidget()
-        layout = QGridLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12) # Gap de 12px requerido
-
-        # --- FILA 1: Grabar/Terminar y Cargar ---
-        self.stack_record = QStackedWidget()
-        self.btn_record = self._create_button("GRABAR TRAYECTORIA", "#1E1E1E", {AppConfig.COLORS.TEXT_HIGH}, "#FF9500")
-        self.btn_stop_record = self._create_button("TERMINAR GRABACIÓN", "#FF9500", "#121212", "none")
-        self.btn_record.clicked.connect(self.request_start_recording.emit)
-        self.btn_stop_record.clicked.connect(self.request_stop_recording.emit)
-        self.stack_record.addWidget(self.btn_record)
-        self.stack_record.addWidget(self.btn_stop_record)
-
-        self.btn_load = self._create_button("CARGAR TRAYECTORIA", "#1E1E1E", {AppConfig.COLORS.TEXT_HIGH}, AppConfig.COLORS.BORDERS)
-        self.btn_load.clicked.connect(self._on_load_clicked)
-
-        # --- FILA 2, COLUMNA 0: Stack de Abortar/Cancelar ---
-        self.stack_abort = QStackedWidget()
-        
-        # Índice 0: Botón SIMULAR (Reemplaza al dummy bloqueado)
-        self.btn_simulate = self._create_button("SIMULAR", "#1A1A1A", "#00F0FF", "#00F0FF")
-        self.btn_simulate.clicked.connect(self.request_simulate_trajectory.emit)
-        
-        # Índice 1: Botón DETENER SIMULACIÓN (Estado SIMULANDO)
-        self.btn_stop_sim = self._create_button("DETENER SIM.", "#2A2A2A", "#FF3B30", "#FF3B30")
-        self.btn_stop_sim.clicked.connect(self.request_stop_simulation.emit)
-
-        # Índice 1: Botón Cancelar activo (Solo cuando está pausado)
-        self.btn_cancel = self._create_button("CANCELAR", "#2A2A2A", "#FF3B30", "#FF3B30")
-        self.btn_cancel.clicked.connect(self.request_cancel_trajectory.emit)
-        
-        self.stack_abort.addWidget(self.btn_simulate)   # 0
-        self.stack_abort.addWidget(self.btn_stop_sim)   # 1
-        self.stack_abort.addWidget(self.btn_cancel)     # 2
-
-        # --- FILA 2, COLUMNA 1: Stack de Ejecución ---
-        self.stack_execute = QStackedWidget()
-        
-        # Índice 0: Ejecutar (Requiere AUTO_READY)
-        self.btn_execute = self._create_button("EJECUTAR", "#1E1E1E", {AppConfig.COLORS.TEXT_HIGH}, "#34C759")
-        self.btn_execute.clicked.connect(self.request_execute_auto.emit)
-        
-        # Índice 1: Pausar (Aparece en AUTO_RUNNING)
-        self.btn_pause = self._create_button("PAUSAR", "#2A2A2A", "#FF9500", "#FF9500")
-        self.btn_pause.clicked.connect(self.request_pause_trajectory.emit)
-        
-        # Índice 2: Reanudar (Aparece en AUTO_PAUSED)
-        self.btn_resume = self._create_button("REANUDAR", "#1E1E1E", {AppConfig.COLORS.TEXT_HIGH}, "#34C759")
-        self.btn_resume.clicked.connect(self.request_resume_trajectory.emit)
-        
-        self.stack_execute.addWidget(self.btn_execute)
-        self.stack_execute.addWidget(self.btn_pause)
-        self.stack_execute.addWidget(self.btn_resume)
-
-        # Configuramos políticas para que todos llenen su celda
-        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        for w in [self.stack_record, self.btn_load, self.stack_abort, self.stack_execute]:
-            w.setSizePolicy(policy)
-
-        layout.addWidget(self.stack_record, 0, 0)
-        layout.addWidget(self.btn_load, 0, 1)
-        layout.addWidget(self.stack_abort, 1, 0)
-        layout.addWidget(self.stack_execute, 1, 1)
-
-        return container
-
-
-    def _create_button(self, text: str, bg_color: str, text_color: str, border_color: str) -> QPushButton:
-        """Helper para generar botones con estilos estandarizados y reducir código repetitivo."""
-        btn = QPushButton(text)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        border = "none" if border_color == "none" else f"1px solid {border_color}"
-        btn.setStyleSheet(
-            f"background-color: {bg_color}; color: {text_color}; "
-            f"border: {border}; border-radius: 4px; font-weight: bold;"
-        )
-        return btn
-
-
-    def _on_load_clicked(self) -> None:
-        """Abre un cuadro de diálogo nativo para seleccionar la trayectoria."""
-        # Se asume que la carpeta 'trajectories' está en el directorio base
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../trajectories'))
-        
-        # Si la carpeta no existe, la crea (prevención de crash)
-        if not os.path.exists(base_dir):
-            os.makedirs(base_dir)
-
-        # Abre el popup filtrando solo los formatos soportados
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Seleccionar Trayectoria",
-            base_dir,
-            "Archivos NumPy (*.npy);;Todos los archivos (*)"
-        )
-
-        if file_path:
-            # Extrae solo el nombre del archivo sin extensión (ej: 'record_171000234' de 'record_171000234.npy')
-            # Esto se adapta a cómo tu TrajectoryRepository suele guardar y cargar.
-            trajectory_name = Path(file_path).stem 
-            self.request_load_trajectory.emit(trajectory_name)
-
-
+    # ==== ACTUALIZACIONES DE ESTADO (SLOTS UI) ====
     def update_machine_state(self, current_state) -> None:
         """
         Actualiza el diseño visual del Segmented Control para reflejar el estado actual.
@@ -505,53 +464,127 @@ class ControlPanel(QWidget):
             self._set_button_enabled(self.btn_simulate, False)
             self._set_button_enabled(self.btn_execute, False)
 
-    def _set_button_enabled(self, btn: QPushButton, enabled: bool) -> None:
+    def set_connection_state(self, is_connected: bool) -> None:
         """
-        Activa o desactiva un botón y actualiza su opacidad visualmente.
-        Limpia estados previos para evitar acumulación de estilos.
+        API Pública para actualizar visualmente el estado de comunicación.
+        Implementa los estilos dinámicos del Design Handoff.
         """
-        btn.setEnabled(enabled)
-        # Limpiamos cualquier opacidad previa
-        base_style = btn.styleSheet().replace(" opacity: 0.5;", "")
-        
-        # Aplicamos la opacidad solo si está deshabilitado
-        if not enabled:
-            base_style += " opacity: 0.5;"
+        self._is_connected = is_connected
+
+        if is_connected:
+            # Estado: CONECTADO (Verde y Cian)
+            self.lbl_conn_icon.setStyleSheet(f"color: {AppConfig.COLORS.SEMANTIC_AUTO}; font-size: 16px; border: none; background: transparent;")
+            self.lbl_conn_text.setStyleSheet(f"color: {AppConfig.COLORS.TEXT_HIGH}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; border: none; background: transparent;")
+            self.lbl_conn_text.setText("ESTADO: ONLINE")
             
-        btn.setStyleSheet(base_style)
+            self.btn_toggle_conn.setText("ENLACE SERIAL ACTIVO")
+            self.btn_toggle_conn.setStyleSheet(
+                f"background-color: rgba(0, 240, 255, 0.1);"
+                f"border: 1px solid {AppConfig.COLORS.SEMANTIC_MANUAL};"
+                f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};"
+                f"border-radius: 4px;"
+                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+                f"font-weight: bold;"
+            )
+        else:
+            # Estado: DESCONECTADO (Rojo y Gris)
+            self.lbl_conn_icon.setStyleSheet(f"color: {AppConfig.COLORS.SEMANTIC_ESTOP}; font-size: 16px; border: none; background: transparent;")
+            self.lbl_conn_text.setStyleSheet(f"color: {AppConfig.COLORS.TEXT_MED}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; border: none; background: transparent;")
+            self.lbl_conn_text.setText("ESTADO: OFFLINE")
+
+            self.btn_toggle_conn.setText("CONECTAR STM32")
+            self.btn_toggle_conn.setStyleSheet(
+                f"background-color: #2A2A2A;"
+                f"border: 1px solid {AppConfig.COLORS.BORDERS};"
+                f"color: #8E8E93;"
+                f"border-radius: 4px;"
+                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+                f"font-weight: bold;"
+            )
+
+    def update_loaded_file_name(self, filename: str) -> None:
+        """
+        Slot público: Actualiza el indicador de archivo cargado en la UI.
+        Si se le pasa None o un string vacío, lo reinicia.
+        """
+        if filename:
+            self.lbl_loaded_file.setText(f"ARCHIVO: [ {filename.upper()} ]")
+            # Cambiamos a verde para indicar que está listo para simular/ejecutar
+            self.lbl_loaded_file.setStyleSheet(
+                f"color: {AppConfig.COLORS.SEMANTIC_AUTO};"
+                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
+                f"font-size: 12px;"
+            )
+        else:
+            self.lbl_loaded_file.setText("ARCHIVO: [ NINGUNO ]")
+            # Vuelve a ámbar/gris indicando que no hay nada cargado
+            self.lbl_loaded_file.setStyleSheet(
+                f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};"
+                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
+                f"font-size: 12px;"
+            )
+
+    def update_telemetry(self, joints: list[float], tcp: list[float]) -> None:
+        """
+        Alimenta las tarjetas con los datos del hardware, 
+        filtrando según el modo activo.
+        """
+        data_source = joints if self._jog_mode == "ARTICULAR" else tcp
+        
+        if len(data_source) >= 3:
+            for i in range(3):
+                self.cards[i].update_value(data_source[i])
 
 
-    def _create_section_placeholder(self, title: str) -> QFrame:
-        """
-        Crea un bloque temporal para visualizar la distribución espacial
-        antes de implementar los controles definitivos.
+    # ==== EVENTOS DE INTERACCION (CLICKS) ====
+    def _on_toggle_jog_mode(self) -> None:
+        """Cambia el sistema de coordenadas y actualiza la UI."""
+        self._jog_mode = "CARTESIANO" if self._jog_mode == "ARTICULAR" else "ARTICULAR"
         
-        Args:
-            title (str): Etiqueta descriptiva del placeholder.
-            
-        Returns:
-            QFrame: Contenedor con estilos de depuración.
-        """
-        frame = QFrame()
-        frame.setStyleSheet(
-            f"QFrame {{"
-            f"  background-color: {AppConfig.COLORS.SURFACE};"
-            f"  border: 1px dashed {AppConfig.COLORS.BORDERS};"
-            f"  border-radius: 4px;"
-            f"}}"
+        self.btn_jog_mode.setText(f"MODO: {self._jog_mode}")
+        self.btn_jog_mode.setStyleSheet(self._get_jog_btn_style(self._jog_mode))
+        
+        for card in self.cards:
+            card.set_mode(self._jog_mode)
+
+    def _on_load_clicked(self) -> None:
+        """Abre un cuadro de diálogo nativo para seleccionar la trayectoria."""
+        # Se asume que la carpeta 'trajectories' está en el directorio base
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../trajectories'))
+        
+        # Si la carpeta no existe, la crea (prevención de crash)
+        if not os.path.exists(base_dir):
+            os.makedirs(base_dir)
+
+        # Abre el popup filtrando solo los formatos soportados
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar Trayectoria",
+            base_dir,
+            "Archivos NumPy (*.npy);;Todos los archivos (*)"
         )
-        
-        # Layout interno temporal para centrar el título
-        layout = QVBoxLayout(frame)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        label = QLabel(title)
-        label.setStyleSheet(
-            f"color: {AppConfig.COLORS.TEXT_MED};"
-            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
-            f"font-size: 14px;"
-            f"border: none;"
-        )
-        layout.addWidget(label)
-        
-        return frame
+
+        if file_path:
+            # Extrae solo el nombre del archivo sin extensión (ej: 'record_171000234' de 'record_171000234.npy')
+            # Esto se adapta a cómo tu TrajectoryRepository suele guardar y cargar.
+            trajectory_name = Path(file_path).stem 
+            self.request_load_trajectory.emit(trajectory_name)
+
+    #? Hay que quitarlo
+    def _on_toggle_clicked(self) -> None:
+        """Slot interno que emite la intención del usuario hacia el orquestador."""
+        # Si NO estamos conectados, solicitamos conexión (True), y viceversa.
+        self.request_connection.emit(not self._is_connected)
+
+
+
+
+
+
+
+
+
+
+
+
+
