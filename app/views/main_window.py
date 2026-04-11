@@ -1,7 +1,11 @@
 """
 Módulo de la Ventana Principal (MainWindow).
 Estructura el esqueleto responsivo de la interfaz utilizando Layouts de Qt.
+Actua como enrutador de datos entre el Orquestador y los componentes visuales.
 """
+
+import numpy as np
+from typing import Any
 
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -11,9 +15,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QProgressBar
 )
-import numpy as np
-from typing import Any
-
 from PySide6.QtCore import Qt
 from app.core.constants import AppConfig
 
@@ -31,10 +32,9 @@ from control.robot_controller import SystemState
 class MainWindow(QMainWindow):
     """
     Ventana principal de la aplicación.
-    Implementa el Layout Maestro estructurando las divisiones proporcionales
-    del Design Handoff usando Stretch Factors.
+    Implementa el Layout Maestro estructurando las divisiones proporcionales.
     """
-
+    # ==== INICIALIZACION ====
     def __init__(self) -> None:
         """Inicializa la ventana principal y su estructura de UI."""
         super().__init__()
@@ -44,6 +44,8 @@ class MainWindow(QMainWindow):
         
         self._setup_ui()
 
+
+    # ==== ENSAMBLAJE DE LA INTERFAZ (LAYOUTS) ====
     def _setup_ui(self) -> None:
         """
         Configura los widgets y layouts principales de la ventana.
@@ -74,7 +76,7 @@ class MainWindow(QMainWindow):
         right_col_layout.setContentsMargins(1, 0, 0, 0)
         right_col_layout.setSpacing(0)
         
-        # Borde divisor de la columna derecha (border-left 1px)
+        # Borde divisor de la columna derecha
         right_col_widget.setStyleSheet(
             f"QWidget#RightColumn {{"
             f"  border-left: 1px solid {AppConfig.COLORS.BORDERS};"
@@ -164,28 +166,8 @@ class MainWindow(QMainWindow):
         right_col_layout.addWidget(self.safety_panel_widget, stretch=15)
         right_col_layout.addWidget(self.control_panel_widget, stretch=85)
     
-    def _create_placeholder_frame(self, name: str, bg_color: str) -> QFrame:
-        """
-        Crea un QFrame de prueba para previsualizar la distribución del Layout.
-        
-        Args:
-            name (str): Nombre del objectName para depuración.
-            bg_color (str): Código HEX del color de fondo del componente.
-            
-        Returns:
-            QFrame: Frame configurado con colores para previsualización estructural.
-        """
-        frame = QFrame()
-        frame.setObjectName(name)
-        # Aplicamos estilo inline temporal para validar el Layout visualmente.
-        # En producción, esto será manejado por el StyleManager y los archivos .qss
-        frame.setStyleSheet(
-            f"QFrame#{name} {{"
-            f"  background-color: {bg_color};"
-            f"}}"
-        )
-        return frame
     
+    # ==== ENRUTAMIENTO DE DATOS ==== 
     def update_dashboard(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict, progress: int) -> None:
         """
         Slot principal (Thread-Safe) que actualiza toda la interfaz gráfica.
@@ -256,6 +238,6 @@ class MainWindow(QMainWindow):
                 self.control_panel_widget._set_button_enabled(self.control_panel_widget.btn_execute, True)
         
 
-        # ENRUTAMIENTO AL PANEL DE SEGURIDAD (Próximamente)
+        # ENRUTAMIENTO AL PANEL DE SEGURIDAD
         if hasattr(self, 'safety_panel_widget'):
             self.safety_panel_widget.update_safety_status(state_name)
