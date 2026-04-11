@@ -37,7 +37,7 @@ class RoboticArmMK2:
 
         #! Vectores de calibracion de hardware
         # q1: directo, q2: directo, q3:invertido
-        self.hw_dir = np.array([1.0, 1.0, 11.0], dtype=np.float32)
+        self.hw_dir = np.array([1.0, 1.0, -1.0], dtype=np.float32)
         # offsets en radiantes
         self.hw_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 

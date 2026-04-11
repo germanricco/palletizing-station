@@ -80,13 +80,14 @@ class WireframeCanvas(FigureCanvasQTAgg):
         # Inyectar Posición "Home" por defecto para que se vea el brazo
         # al arrancar la UI (Matriz de 6 eslabones x 3 coordenadas X, Y, Z)
         default_home_state = np.array([
-            [0.0,   0.0,   0.0],    # Base
-            [0.0,   0.0,  50.0],    # J1
-            [0.0,  50.0, 150.0],    # J2
-            [0.0, 100.0, 200.0],    # J3
-            [0.0, 150.0, 150.0],    # J4
-            [0.0, 150.0, 100.0]     # TCP
-        ])
+            [0.0,     0.0,   0.0],    # 0. GCS (Global Coordinate System)
+            [0.0,     0.0,   0.0],    # 1. MCS (Machine Coordinate System)
+            [0.0,     0.0,  92.0],    # 2. J1  (Altura L1)
+            [0.0,     0.0, 227.0],    # 3. J2  (Hombro vertical: L1 + L2 = 92 + 135)
+            [0.0,   147.0, 227.0],    # 4. WP  (Codo extendido en X: L3 = 147)
+            [0.0,   122.0, 227.0]     # 5. TCP (Caída hacia la herramienta: WP_z - L4 = 227 - 25)
+        ], dtype=np.float32)
+
         self.draw_robot(default_home_state)
 
     def _update_joints(self, frame_state: np.ndarray) -> None:

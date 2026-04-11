@@ -26,9 +26,6 @@ from app.views.components.log_viewer import LogViewer
 from app.views.components.digital_twin import DigitalTwin
 
 
-from control.robot_controller import SystemState
-
-
 class MainWindow(QMainWindow):
     """
     Ventana principal de la aplicación.

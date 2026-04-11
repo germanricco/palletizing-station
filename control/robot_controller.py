@@ -12,15 +12,15 @@ from communication.async_uart import AsyncUARTCommunicator
 from control.trajectory_streamer import TrajectoryStreamer
 
 class SystemState(Enum):
-    BOOT = "BOOT",
-    INIT = "INIT",
-    IDLE = "IDLE",
-    MANUAL = "MANUAL",
-    RECORDING = "RECORDING",
-    AUTO_READY = "AUTO_READY",
-    AUTO_RUNNING = "AUTO_RUNNING",
-    AUTO_PAUSED = "AUTO_PAUSED",
-    FAULT = "FAULT",
+    BOOT = "BOOT"
+    INIT = "INIT"
+    IDLE = "IDLE"
+    MANUAL = "MANUAL"
+    RECORDING = "RECORDING"
+    AUTO_READY = "AUTO_READY"
+    AUTO_RUNNING = "AUTO_RUNNING"
+    AUTO_PAUSED = "AUTO_PAUSED"
+    FAULT = "FAULT"
     EMERGENCY = "EMERGENCY"
 
 
@@ -122,29 +122,27 @@ class RobotController:
         Cierra la conexión UART de forma segura, aborta operaciones en curso 
         y limpia el estado de las variables volátiles.
         """
-        self.logger.info("Solicitud de desconexión recibida. Abortando procesos activos...")
+        self.logger.info("Solicitud de desconexión. Abortando procesos en curso...")
 
-        # 1. Parada de seguridad a nivel de software (Evita fugas de memoria y bloqueos lógicos)
+        # Parada de seguridad a nivel de software (Evita fugas de memoria y bloqueos lógicos)
         self.streamer.reset()
         self.recording_buffer.clear()
 
-        # 2. Handshake de Desconexión (Hardware Sleep)
+        # Handshake de Desconexión (Hardware Sleep)
         if self.is_connected:
-            self.logger.info("Enviando comando M98 (Hardware Sleep / Go to INIT)...")
+            self.logger.debug("Enviando comando M98 (Hardware Sleep / Go to INIT)...")
             
-            # Usamos send_message directamente (en lugar de _dispatch_command) 
-            # porque no esperaremos el ACK_M98. Vamos a cortar la conexión inmediatamente.
+            # No esperaremos el ACK_M98. Vamos a cortar la conexión inmediatamente.
             self.uart.send_message("M98")
             
             # Retardo bloqueante mínimo (100ms) para permitir que el hilo de TX
-            # vacíe la cola (tx_queue) y los bytes salgan por el cable físico.
             import time
             time.sleep(0.1)
 
-        # 3. Desconexión física a través de la capa de comunicación
+        # Desconexión física a través de la capa de comunicación
         self.uart.disconnect()
 
-        # 4. Forzar el estado local a INIT para reflejar la pérdida de enlace
+        # Forzar el estado local a INIT para reflejar la pérdida de enlace
         self._change_internal_state(SystemState.INIT)
         self.logger.info("Desconexión finalizada de manera segura. Sistema Offline.")
 
@@ -245,7 +243,7 @@ class RobotController:
         Parametros:
             event_msg: Codigo de evento de hardware
         """
-        if event_msg == "ESTOP":
+        if event_msg == "EMERGENCY":
             self.logger.critical("Hardware reporto activacion de parada de emergencia.")
             self._force_emergency_stop("Boton fisico de emergencia presionado.")
 
@@ -280,7 +278,7 @@ class RobotController:
         new_state = mapping.get(ack_msg)
 
         if new_state:
-            self.logger.info(f"Confirmacion recibida: {ack_msg}. Sincronizando estado.")
+            self.logger.debug(f"Confirmacion recibida: {ack_msg}. Sincronizando estado.")
             self._change_internal_state(new_state)
 
             if ack_msg == "ACK_M115":
@@ -330,6 +328,9 @@ class RobotController:
             if getattr(self, 'active_trajectory', None) is not None:
                 self.logger.debug("Purgando cache de trayectoria automatica.")
                 self.active_trajectory = None
+
+                if self.trajectory_loaded_callback is not None:
+                    self.trajectory_loaded_callback("")
 
             self.streamer.reset()
 
@@ -429,12 +430,8 @@ class RobotController:
             self.logger.error(f"Fallo de comunicacion TX: Buffer saturado al intentar enviar {cmd}.")
             return False
         
-        self.logger.info(f"Comando {cmd} despachado. Aguardando confirmación...")
+        self.logger.debug(f"Comando {cmd} despachado. Aguardando confirmación...")
         return True
-
-    def _handle_state_event(self, event: str) -> None:
-        pass
-    # Si mandas EVT: S1_ACTIVE
 
 
     # ==== TRANSICIONES DE MODOS LOGICOS ====
