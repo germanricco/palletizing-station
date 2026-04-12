@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 # Importaciones de los módulos del proyecto
 from control.robot_controller import RobotController
 from utils.qt_log_handler import QtLogHandler
-from app.RobotGUIApp import RobotGUIApp  # Tu archivo modificado arriba
+from app.RobotGUIApp import RobotGUIApp
 
 def graceful_shutdown(controller: RobotController) -> None:
     """

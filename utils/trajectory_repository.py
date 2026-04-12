@@ -29,10 +29,8 @@ class TrajectoryRepository:
         filepath = os.path.join(self.storage_dir, name)
         
         try:
-            # np.save serializa la matriz a binario puro. Es una operación síncrona,
-            # pero al ser binaria, toma microsegundos y no bloquea el sistema.
             np.save(filepath, trajectory_matrix)
-            self.logger.info(f"Matriz '{name}' (Shape: {trajectory_matrix.shape}) guardada exitosamente en '{self.storage_dir}'.")
+            self.logger.debug(f"Matriz '{name}' (Shape: {trajectory_matrix.shape}) guardada exitosamente en '{self.storage_dir}'.")
             return True
         except IOError as e:
             # Si el disco está lleno o hay un problema de permisos, fallará aquí.
@@ -57,7 +55,7 @@ class TrajectoryRepository:
         try:
             # np.load lee el binario y reconstruye la matriz en RAM instantáneamente.
             matrix = np.load(filepath)
-            self.logger.info(f"Matriz '{name}' cargada exitosamente. Shape: {matrix.shape}. desde '{self.storage_dir}'.")
+            self.logger.debug(f"Matriz '{name}' cargada exitosamente. Shape: {matrix.shape}. desde '{self.storage_dir}'.")
             return matrix
         except Exception as e:
             self.logger.error(f"Corrupcion de datos al cargar '{name}': {e}")

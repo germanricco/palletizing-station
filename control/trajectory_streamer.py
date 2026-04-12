@@ -101,6 +101,6 @@ class TrajectoryStreamer:
 
         # Iteración sobre la vista matricial
         for row in chunk_view:
-            cmd = f"P:{row[0]:.2f},{row[1]:.2f},{row[2]:.2f}"
+            cmd = f"G1:{row[0]:.2f},{row[1]:.2f},{row[2]:.2f}"
             self.comm.send_message(cmd)
         self.logger.debug(f"Chunk enviado ({chunk_view.shape[0]} puntos). Progreso: {self.current_index}/{self.total_points}")

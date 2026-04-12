@@ -7,6 +7,7 @@ class RoboticArmMK2:
     Gemelo Dgital para el robot EEZYbotARM MK2.
     Implementa cinematica para generacion de trayectorias (tensorizada).
     """
+    # ==== INICIALIZACION Y PARAMETROS FISICOS ====
     def __init__(self, initial_q_rad: Optional[np.ndarray] = None):
         """
         Inicializa la topologia del manipulador y las estructuras de estado.
@@ -31,8 +32,14 @@ class RoboticArmMK2:
         self.q2_min_rad = np.deg2rad(39.0)
         self.q2_max_rad = np.deg2rad(120.0)
 
-        # Transformacion de Celta de Trabajo (GCS a MCS)
+        # Transformacion de Celda de Trabajo (GCS a MCS)
         self.T_GCS_MCS = np.eye(4, dtype=np.float32)
+
+        #! Vectores de calibracion de hardware
+        # q1: directo, q2: directo, q3:invertido
+        self.hw_dir = np.array([1.0, 1.0, -1.0], dtype=np.float32)
+        # offsets en radiantes
+        self.hw_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
         # Estado Interno
         if initial_q_rad is None:
@@ -45,8 +52,9 @@ class RoboticArmMK2:
         self.cartesian_state = np.zeros((1, 6, 3), dtype=np.float32)
         self._update_internal_state(self.q)
 
-    # GETTERS DE ACCESO A ESTADO ARTICULAR Y CARTESIANO
-    def get_angular_satate(self) -> np.ndarray:
+    
+    # ==== GETTERS (INTERFAZ DE LECTURA DE ESTADO) ====
+    def get_angular_state(self) -> np.ndarray:
         """Retorna copia del vector de estado articular actual [q1, q2, q3]"""
         return self.q.copy()
     
@@ -54,37 +62,46 @@ class RoboticArmMK2:
         """Retorna la matriz (6, 3) del estado actual absoluto (GCS)."""
         return self.cartesian_state[0].copy()
 
-    def _calc_q3_limits(self, q2_rad: float) -> Tuple[float, float]:
-        """Calcula los límites dinámicos mecánicos para la articulación 3."""
-        q2_deg = np.rad2deg(q2_rad)
-        q3_min_deg = (-0.6755 * q2_deg) - 70.768
-        q3_max_deg = (-0.7165 * q2_deg) - 13.144
-        return np.deg2rad(q3_min_deg), np.deg2rad(q3_max_deg)   
 
-    def update_state(self, q1_rad: float, q2_rad: float, q3_rad: float) -> None:
+    # ==== CAPA DE ADAPTACION HARDWARE <-> MATEMATICA
+    def servo_to_kinematic(self, q_servo: np.ndarray) -> np.ndarray:
+        """Traduce valores crudos de los servomotores al espacio matemático."""
+        return (q_servo * self.hw_dir) + self.hw_offset
+
+    def kinematic_to_servo(self, q_kin: np.ndarray) -> np.ndarray:
+        """Traduce ángulos matemáticos a valores físicos de los servomotores."""
+        return (q_kin - self.hw_offset) / self.hw_dir
+    
+    def map_kinematic_trajectory_to_servos(self, q_kin_matrix: np.ndarray) -> np.ndarray:
+        """
+        Recibe una matriz de trayectoria calculada matemáticamente (N, 3)
+        y la traduce de vuelta a ángulos que el microcontrolador entienda (0 a 180°).
+        """
+        # Operación vectorizada: Q_servo = (Q_kin - offset) / dir
+        q_servo_matrix = (q_kin_matrix - self.hw_offset) / self.hw_dir
+        return q_servo_matrix
+    
+    
+    # ==== GESTION DE ESTADO INTERNO Y RESTRICCIONES ====
+    def update_state(self, q1_servo_rad: float, q2_servo_rad: float, q3_servo_rad: float) -> None:
         """
         Actualiza el estado interno.
         Realiza saturacion de valores anomalos a los limites fisicos
         """
-        q1_safe = np.clip(q1_rad, self.q1_min_rad, self.q1_max_rad)
-        q2_safe = np.clip(q2_rad, self.q2_min_rad, self.q2_max_rad)
+        q_servo = np.array([q1_servo_rad, q2_servo_rad, q3_servo_rad], dtype=np.float32)
+        q_kin = (q_servo * self.hw_dir) + self.hw_offset
+
+        q1_safe = np.clip(q_kin[0], self.q1_min_rad, self.q1_max_rad)
+        q2_safe = np.clip(q_kin[1], self.q2_min_rad, self.q2_max_rad)
 
         # Calcular limites q3 dinamicamente
         q3_min, q3_max = self._calc_q3_limits(q2_safe)
-        q3_safe = np.clip(q3_rad, q3_min, q3_max)
+        q3_safe = np.clip(q_kin[2], q3_min, q3_max)
 
         q_safe = np.array([q1_safe, q2_safe, q3_safe], dtype=np.float32)
 
-        # Advertencia si valores recibidos estaban fuera de límites físicos
-        if q1_rad != q_safe[0] or q2_rad != q_safe[1] or q3_rad != q_safe[2]:
-            self.logger.warning(
-                f"Intento de actualización de estado con valores fuera de límites físicos. Se aplicó saturación. "
-                f"Articulaciones originales: q1={q1_rad}, q2={q2_rad}, q3={q3_rad}. "
-                f"Articulaciones saturadas: q1={q1_safe}, q2={q2_safe}, q3={q3_safe}"
-            )
-
         self._update_internal_state(q_safe)
-
+    
     def _update_internal_state(self, q_vector: np.ndarray) -> None:
         """
         Actualiza la variable de estado y recalcula la cache de coordenadas cartesianas.
@@ -92,11 +109,16 @@ class RoboticArmMK2:
         self.q[:] = q_vector
         # Se invoca la cinematica directa expandiendo las dimensiones a (1, 3)
         self.cartesian_state = self.forward_kinematics(self.q[np.newaxis, :])
+        
+    def _calc_q3_limits(self, q2_rad: float) -> Tuple[float, float]:
+        """Calcula los límites dinámicos mecánicos para la articulación 3."""
+        q2_deg = np.rad2deg(q2_rad)
+        q3_min_deg = (-0.6755 * q2_deg) - 70.768
+        q3_max_deg = (-0.7165 * q2_deg) - 13.144
+        return np.deg2rad(q3_min_deg), np.deg2rad(q3_max_deg)   
 
-    #
-    #   CINEMATICA TENSORIZADA PARA GENERACION DE TRAYECTORIAS
-    #
-
+    
+    # ==== MOTOR DE CINEMATICA ====
     @staticmethod
     def _dh_tensor(thetas : np.ndarray, d: float, a: float, alpha: float) -> np.ndarray:
         """
