@@ -3,15 +3,11 @@ Módulo del componente Gemelo Digital (Digital Twin).
 Actúa como un lienzo de renderizado con paneles HUD superpuestos mediante
 anclaje absoluto y simulación de Z-Index para no obstruir la telemetría.
 """
+import logging
 import numpy as np
 
-from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QLabel,
-    QFrame
-)
-from PySide6.QtGui import QPainter, QColor, QPen, QResizeEvent, QPaintEvent
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtCore import Qt
 
 # Componentes de la UI
@@ -44,9 +40,9 @@ class HUDPanel(QFrame):
 class DigitalTwin(QWidget):
     """
     Contenedor principal del Gemelo Digital.
-    Gestiona el renderizado del fondo y la posición absoluta de sus capas.
+    Gestiona el renderizado del fondo 3D y la posición absoluta de sus capas HUD.
     """
-
+    # ==== INICIALIZACION Y LAYOUT MAESTRO ====
     def __init__(self, parent: QWidget | None = None) -> None:
         """Inicializa el lienzo y las capas superpuestas."""
         super().__init__(parent)
@@ -54,18 +50,20 @@ class DigitalTwin(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"background-color: {AppConfig.COLORS.BACKGROUND};")
         
-        # Delegamos el Canvas a un layout de fondo exclusivo
+        # Capa 0: Layout de fondo exclusivo
         self.bg_layout = QVBoxLayout(self)
         self.bg_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 1. Capa 0: Instanciar y enviar al fondo el Renderizador 3D
+        # Instanciar y enviar al fondo el Renderizador 3D
         self.canvas_3d = WireframeCanvas()
         self.bg_layout.addWidget(self.canvas_3d)
 
-        # 2. Capa 1 y 2: Instanciar HUDs y Barra de Tiempo
+        # Capa 1 y 2: Componentes Flotantes
         self._setup_huds()
         self._setup_progress_bar()
 
+    
+    # ==== CONSTRUCCION DE COMPONENTES ====
     def _setup_huds(self) -> None:
         """Instancia los paneles HUD izquierdo y derecho (Capa 1)."""
         # --- HUD Izquierdo: Sistema y Actuadores ---
@@ -95,10 +93,9 @@ class DigitalTwin(QWidget):
         self.lbl_act1 = self._create_actuator_pill("ACT 1: ENABLED", AppConfig.COLORS.SEMANTIC_MANUAL)
         self.lbl_act2 = self._create_actuator_pill("ACT 2: ENABLED", AppConfig.COLORS.SEMANTIC_MANUAL)
 
-        hud_left_layout.addWidget(self.lbl_link)
-        hud_left_layout.addWidget(self.lbl_state)
-        hud_left_layout.addWidget(self.lbl_act1)
-        hud_left_layout.addWidget(self.lbl_act2)
+        # Agregamos los widgets al Layout del HUD Izquierdo
+        for widget in [self.lbl_link, self.lbl_state, self.lbl_act1, self.lbl_act2]:
+            hud_left_layout.addWidget(widget)
 
         self.hud_left.adjustSize()
 
@@ -109,7 +106,7 @@ class DigitalTwin(QWidget):
         hud_right_layout.setSpacing(12)
 
         # Título Cinemática
-        lbl_kin_title = QLabel("CINEMÁTICA DIRECTA")
+        lbl_kin_title = QLabel("POSICION ACTUAL")
         lbl_kin_title.setStyleSheet(
             f"color: {AppConfig.COLORS.TEXT_MED};"
             f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
@@ -139,29 +136,13 @@ class DigitalTwin(QWidget):
             f"padding-top: 8px; line-height: 1.5;"
         )
 
-        hud_right_layout.addWidget(lbl_kin_title)
-        hud_right_layout.addWidget(self.lbl_articular)
-        hud_right_layout.addWidget(self.lbl_cartesian)
+        # Agregamos widgets al Layout del HUD Derecho
+        for widget in [lbl_kin_title, self.lbl_articular, self.lbl_cartesian]:
+            hud_right_layout.addWidget(widget)
 
         # Valores por defecto para visualización inicial
         self._update_kinematics([45.2, -15.0, 90.5], [120.5, -45.2, 210.0])
-
         self.hud_right.adjustSize()
-
-    def _create_actuator_pill(self, text: str, border_color: str) -> QLabel:
-        """Crea una etiqueta redondeada (pill) para el estado de los actuadores."""
-        lbl = QLabel(text)
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet(
-            f"background-color: {AppConfig.COLORS.SURFACE};"
-            f"border: 1px solid {border_color};"
-            f"border-radius: 12px;"
-            f"padding: 4px 8px;"
-            f"color: {AppConfig.COLORS.TEXT_HIGH};"
-            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
-            f"font-size: 12px;"
-        )
-        return lbl
 
     def _setup_progress_bar(self) -> None:
         """Instancia la línea de tiempo/progreso inferior (Capa 2)."""
@@ -182,14 +163,58 @@ class DigitalTwin(QWidget):
             f"background: transparent;"
         )
         self.lbl_timeline.hide()
+
         self.timeline_layout.addWidget(self.lbl_timeline)
-        
         self._update_timeline_style(0)
+    
+    def _create_actuator_pill(self, text: str, border_color: str) -> QLabel:
+        """Crea una etiqueta redondeada (pill) para el estado de los actuadores."""
+        lbl = QLabel(text)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet(
+            f"background-color: {AppConfig.COLORS.SURFACE};"
+            f"border: 1px solid {border_color};"
+            f"border-radius: 12px;"
+            f"padding: 4px 8px;"
+            f"color: {AppConfig.COLORS.TEXT_HIGH};"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+            f"font-size: 12px;"
+        )
+        return lbl
+
+    
+    # ==== API PUBLICA (SLOTS) ====
+    def process_telemetry(self, cartesian_state: np.ndarray, joints: list[float], state_name: str, actuator_state: dict) -> None:
+        """
+        Procesa el pipeline completo de actualización visual para el Gemelo Digital.
+        
+        Args:
+            cartesian_state (np.ndarray): Matriz (6, 3) con posiciones X, Y, Z.
+            joints (list[float]): Lista con los ángulos [J1, J2, J3].
+            state_name (str): Nombre del estado lógico actual (ej. "IDLE").
+            actuator_state (dict): Diccionario con estados booleanos {'valve': bool, 'pump': bool}.
+        """
+        try:
+            # Actualizar Canvas 3D
+            self.canvas_3d.draw_robot(cartesian_state)
+
+            # Extraer el TCP
+            if getattr(cartesian_state, 'shape', (0,))[0] >= 6:
+                tcp_coords = cartesian_state[5].tolist()
+                self._update_kinematics(joints, tcp_coords)
+            else:
+                # Si array está incompleto, pasamos listas vacías
+                self._update_kinematics(joints, [0.0, 0.0, 0.0])
+
+            # Actualizar HUD Izquierdo (Estados y Actuadores)
+            self._update_hud_status(state_name, actuator_state)
+
+        except Exception as e:
+            logging.error(f"Error procesando telemetría en DigitalTwin: {e}")
 
     def set_timeline_state(self, is_active: bool, progress: int = 0, text: str = "TRAYECTORIA ACTIVA") -> None:
         """
         Controla la expansión, texto y progreso de la barra inferior de trayectorias.
-        Implementa los cambios físicos solicitados en el Design Handoff.
         """
         self.timeline_active = is_active
         
@@ -202,74 +227,15 @@ class DigitalTwin(QWidget):
             self.lbl_timeline.hide()
             
         self._update_timeline_style(progress)
-        
-        # Al cambiar la altura (de 4px a 24px o viceversa), forzamos el recálculo 
-        # del anclaje absoluto inferior (bottom: 0) disparando el resizeEvent internamente.
-        from PySide6.QtGui import QResizeEvent
         self.resizeEvent(QResizeEvent(self.size(), self.size()))
 
-    def _update_timeline_style(self, progress: int) -> None:
-        """Actualiza el gradiente de progreso de la barra."""
-        # Se asegura de que el progreso esté entre 0 y 100
-        progress = max(0, min(100, progress))
-        
-        if not self.timeline_active:
-            self.timeline.setStyleSheet(f"background-color: {AppConfig.COLORS.BORDERS};")
-        else:
-            color_active = AppConfig.COLORS.SEMANTIC_AUTO
-            color_bg = AppConfig.COLORS.BORDERS
-            
-            # Protección matemática: si el progreso es 0, no aplicamos gradiente para evitar fallos de render en Qt
-            if progress <= 0:
-                self.timeline.setStyleSheet(f"background-color: {color_bg};")
-            else:
-                ratio = progress / 100.0
-                # Se suma un delta mínimo (0.001) al stop para lograr un corte duro (sólido) en lugar de un difuminado
-                self.timeline.setStyleSheet(
-                    f"background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, "
-                    f"stop:0 {color_active}, stop:{ratio} {color_active}, "
-                    f"stop:{min(1.0, ratio + 0.001)} {color_bg}, stop:1 {color_bg});"
-                )
-
-    def update_wireframe(self, state: np.ndarray) -> None:
-        """
-        Wrapper publico. Delega la matriz numpy al canvas 3D
-        """
-        self.canvas_3d.draw_robot(state)
-
-    def process_telemetry(self, cartesian_state: np.ndarray, joints: list[float], state_name: str, actuator_state: dict) -> None:
-        """
-        Procesa el pipeline completo de actualización visual para el Gemelo Digital.
-        
-        Args:
-            cartesian_state (np.ndarray): Matriz (6, 3) con posiciones X, Y, Z.
-            joints (list[float]): Lista con los ángulos [J1, J2, J3].
-            state_name (str): Nombre del estado lógico actual (ej. "IDLE").
-            actuator_state (dict): Diccionario con estados booleanos {'valve': bool, 'pump': bool}.
-        """
-        try:
-            # 1. Actualizar Canvas 3D (Se alimenta con la matriz completa)
-            self.canvas_3d.draw_robot(cartesian_state)
-
-            # 2. Extraer el TCP (Última fila del modelo cinemático: índice 5)
-            if getattr(cartesian_state, 'shape', (0,))[0] >= 6:
-                tcp_coords = cartesian_state[5].tolist()
-                self.__update_kinematics(joints, tcp_coords)
-            else:
-                # Si el array está incompleto, pasamos listas vacías para no actualizar con basura
-                self.__update_kinematics(joints, [0.0, 0.0, 0.0])
-
-            # 4. Actualizar HUD Izquierdo (Estados y Actuadores)
-            self._update_hud_status(state_name, actuator_state)
-
-        except Exception as e:
-            pass 
-
+    
+    # ==== ACTUALIZADORES INTERNOS (HELPERS) ====
     def _update_hud_status(self, state_name: str, actuator_state: dict) -> None:
         """
         Actualiza el panel izquierdo (Modo de la máquina y actuadores finales).
         """
-        # Lógica de colores según el Design Handoff
+        # Lógica de colores
         color_map = {
             "IDLE": AppConfig.COLORS.TEXT_MED,
             "MANUAL": AppConfig.COLORS.SEMANTIC_MANUAL,
@@ -283,7 +249,7 @@ class DigitalTwin(QWidget):
         self.lbl_state.setText(f"ESTADO: {state_name}")
         self.lbl_state.setStyleSheet(f"color: {state_color}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; border: none; background: transparent;")
 
-        # Actualizar Pills de Actuadores (Valve y Pump)
+        # Actualizar Pills de Actuadores
         valve_active = actuator_state.get('valve', False)
         pump_active = actuator_state.get('pump', False)
 
@@ -308,7 +274,6 @@ class DigitalTwin(QWidget):
             f"font-size: 12px;"
         )
 
-    # --- APIs Públicas para el Orquestador ---
     def _update_kinematics(self, joints: list[float], tcp: list[float]) -> None:
         """
         Actualiza los valores de la cinemática forzando el zero-padding estricto
@@ -319,34 +284,50 @@ class DigitalTwin(QWidget):
             tcp (list[float]): Coordenadas cartesianas [X, Y, Z] en mm.
         """
         if len(joints) >= 3:
-            articular_text = (
+            self.lbl_articular.setText(
                 f"J1: {joints[0]:+07.2f}°\n"
                 f"J2: {joints[1]:+07.2f}°\n"
-                f"J3: {joints[2]:+07.2f}°"
-            )
-            self.lbl_articular.setText(articular_text)
+                f"J3: {joints[2]:+07.2f}°")
             
         if len(tcp) >= 3:
-            cartesian_text = (
+            self.lbl_cartesian.setText(
                 f"X: {tcp[0]:+08.2f} mm\n"
                 f"Y: {tcp[1]:+08.2f} mm\n"
-                f"Z: {tcp[2]:+08.2f} mm"
-            )
-            self.lbl_cartesian.setText(cartesian_text)
+                f"Z: {tcp[2]:+08.2f} mm")
+    
+    def _update_timeline_style(self, progress: int) -> None:
+        """Actualiza el gradiente de progreso de la barra."""
+        # Asegurar de que el progreso esté entre 0 y 100
+        progress = max(0, min(100, progress))
+        
+        if not self.timeline_active:
+            self.timeline.setStyleSheet(f"background-color: {AppConfig.COLORS.BORDERS};")
+        else:
+            color_active = AppConfig.COLORS.SEMANTIC_AUTO
+            color_bg = AppConfig.COLORS.BORDERS
+            
+            # Protección matemática: si el progreso es 0, no aplicamos gradiente para evitar fallos de render en Qt
+            if progress <= 0:
+                self.timeline.setStyleSheet(f"background-color: {color_bg};")
+            else:
+                ratio = progress / 100.0
+                # Se suma un delta mínimo (0.001) al stop para lograr un corte duro (sólido) en lugar de un difuminado
+                self.timeline.setStyleSheet(
+                    f"background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, "
+                    f"stop:0 {color_active}, stop:{ratio} {color_active}, "
+                    f"stop:{min(1.0, ratio + 0.001)} {color_bg}, stop:1 {color_bg});"
+                )
 
-    # --- Sobrecarga de Eventos (Core de la Arquitectura UI) ---
+
+    # ==== EVENTOS NATIVOS (OVERRIDES) ====
     def resizeEvent(self, event: QResizeEvent) -> None:
         """
-        Mantiene los HUDs y la barra anclados en sus posiciones absolutas 
-        incluso si la ventana cambia de tamaño.
+        Asegura el anclaje absoluto y la jerarquia Z de los componentes flotantes.
         """
         super().resizeEvent(event)
         
-        # Anclaje Top-Left: Izquierda a 24px, Arriba a 24px
         self.hud_left.move(24, 24)
-        # Anclaje Top-Right: Derecha restando el ancho (280) y el margen (24)
         self.hud_right.move(self.width() - self.hud_right.width() - 24, 24)
-        # Anclaje Bottom: Abarca el 100% del ancho, apoyado al fondo
         self.timeline.setGeometry(0, self.height() - self.timeline.height(), self.width(), self.timeline.height())
 
         self.hud_left.raise_()
