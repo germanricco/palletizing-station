@@ -91,50 +91,41 @@ struct CommandResult {
 
 /*
  * ------------------------------------------------
+ * Comando / punto automático parseado desde G:q1,q2,q3,a1,a2
+ * ------------------------------------------------
+ */
+struct PendingAutoCommand {
+    bool valid;
+    float q1;
+    float q2;
+    float q3;
+    uint8_t a1;
+    uint8_t a2;
+};
+
+/*
+ * ------------------------------------------------
  * Clase principal del controlador de estación
  * ------------------------------------------------
  */
 class Controller {
 public:
-    /*
-     * Constructor.
-     * Recibe referencias a los recursos ya existentes.
-     */
     Controller(TerminalSerial& terminal,
                Joystick& joystickIzquierdo,
                Servo& servoBase);
 
-    /*
-     * Inicialización general.
-     */
     void init(void);
-
-    /*
-     * Update principal.
-     */
     void update(uint32_t nowMs);
 
-    /*
-     * Getters públicos.
-     */
     GlobalState getState(void) const;
     GlobalState getPreviousState(void) const;
     const char* getStateName(void) const;
 
-    /*
-     * Conversión pública de estado a texto.
-     */
     static const char* stateToString(GlobalState state);
 
-    /*
-     * Gestión del flag de cambio de estado.
-     */
     bool didStateChange(void) const;
     void clearStateChangeFlag(void);
 
-    /*
-     * Permiten forzar estados críticos desde afuera.
-     */
     void forceFault(uint32_t nowMs);
     void forceEmergency(uint32_t nowMs);
 
@@ -163,6 +154,29 @@ private:
     uint32_t _stateEntryTick;
     uint32_t _tiempoUltimoEnvioTelemetria;
 
+    /*
+     * ------------------------------------------------
+     * Punto G individual para pruebas en AUTO_READY
+     * ------------------------------------------------
+     */
+    PendingAutoCommand _pendingAutoCommand;
+    bool _hasPendingAutoCommand;
+
+    /*
+     * ------------------------------------------------
+     * NUEVO: FIFO de puntos para AUTO_RUNNING
+     * ------------------------------------------------
+     */
+    static constexpr uint8_t AUTO_FIFO_CAPACITY = 16U;
+    PendingAutoCommand _autoFifo[AUTO_FIFO_CAPACITY];
+    uint8_t _autoFifoHead;
+    uint8_t _autoFifoTail;
+    uint8_t _autoFifoCount;
+
+    PendingAutoCommand _activeAutoPoint;
+    bool _hasActiveAutoPoint;
+    bool _chunkRequestPending;
+
 private:
     /*
      * ================================================================
@@ -179,6 +193,28 @@ private:
     CommandResult makeErr(const char* errText);
     CommandResult makeHandledNoReply(void);
     CommandResult makeNotHandled(void);
+
+    /*
+     * ================================================================
+     * Parser local para G:q1,q2,q3,a1,a2
+     * ================================================================
+     */
+    bool tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd);
+
+    /*
+     * ================================================================
+     * Helpers FIFO para AUTO_RUNNING
+     * ================================================================
+     */
+    bool enqueueAutoPoint(const PendingAutoCommand& cmd);
+    bool dequeueAutoPoint(PendingAutoCommand& cmd);
+    bool isAutoFifoEmpty(void) const;
+    bool isAutoFifoFull(void) const;
+    void clearAutoFifo(void);
+    void clearAutoRuntimeState(void);
+    void startNextAutoPointIfNeeded(void);
+    void processActiveAutoPoint(void);
+    void requestNextChunkIfNeeded(void);
 
     /*
      * ================================================================

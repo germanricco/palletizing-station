@@ -381,7 +381,7 @@ class RobotController:
 
         # 3. Comandos Arbitrarios (G-Codes de movimiento, actuadores, etc.)
         # Evaluamos la Condición de Guarda: ¿El estado actual permite inyección manual?
-        allowed_states_for_manual_gcode = [SystemState.IDLE, SystemState.MANUAL]
+        allowed_states_for_manual_gcode = [SystemState.IDLE, SystemState.MANUAL,SystemState.AUTO_READY]
         
         if self.current_state not in allowed_states_for_manual_gcode:
             self.logger.warning(
