@@ -91,6 +91,24 @@ struct CommandResult {
 
 /*
  * ------------------------------------------------
+ * NUEVO: almacenamiento de comando G pendiente
+ * ------------------------------------------------
+ *
+ * Esta estructura permite validar recepción + parseo + almacenamiento
+ * sin tocar todavía la lógica interna del Servo.
+ */
+struct PendingAutoCommand {
+    bool valid;
+    float q1;
+    float q2;
+    float q3;
+    uint8_t a1;
+    uint8_t a2;
+    float v;
+};
+
+/*
+ * ------------------------------------------------
  * Clase principal del controlador de estación
  * ------------------------------------------------
  */
@@ -163,6 +181,14 @@ private:
     uint32_t _stateEntryTick;
     uint32_t _tiempoUltimoEnvioTelemetria;
 
+    /*
+     * ------------------------------------------------
+     * NUEVO: buffer interno para comando G recibido en AUTO_READY
+     * ------------------------------------------------
+     */
+    PendingAutoCommand _pendingAutoCommand;
+    bool _hasPendingAutoCommand;
+
 private:
     /*
      * ================================================================
@@ -179,6 +205,13 @@ private:
     CommandResult makeErr(const char* errText);
     CommandResult makeHandledNoReply(void);
     CommandResult makeNotHandled(void);
+
+    /*
+     * ================================================================
+     * NUEVO: parser local para G:q1,q2,q3,a1,a2,v
+     * ================================================================
+     */
+    bool tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd);
 
     /*
      * ================================================================

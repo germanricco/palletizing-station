@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cctype>
+#include <cstdlib>
 
 namespace Station {
 
@@ -69,7 +70,9 @@ Controller::Controller(TerminalSerial& terminal,
       _initialized(false),
       _primerIngresoIdle(true),
       _stateEntryTick(0U),
-      _tiempoUltimoEnvioTelemetria(0U) {
+      _tiempoUltimoEnvioTelemetria(0U),
+	  _pendingAutoCommand{false, 0.0f, 0.0f, 0.0f, 0U, 0U, 0.0f}, /* NUEVO */
+	  _hasPendingAutoCommand(false){	/*NUEVO*/
 }
 
 /*
@@ -92,6 +95,8 @@ void Controller::init(void) {
     _primerIngresoIdle = true;
     _stateEntryTick = 0U;
     _tiempoUltimoEnvioTelemetria = 0U;
+    _pendingAutoCommand = {false, 0.0f, 0.0f, 0.0f, 0U, 0U, 0.0f}; /* NUEVO */
+    _hasPendingAutoCommand = false;  /* NUEVO */
 
     onEnterState(_state);
 }
@@ -310,6 +315,138 @@ UartCommand Controller::parseUartCommand(const char* text) {
     if (std::strcmp(cmd, "STATUS") == 0) return UartCommand::Status;
 
     return UartCommand::Unknown;
+}
+
+/*
+ * ================================================================
+ * NUEVO: parser local para comando G:q1,q2,q3,a1,a2,v
+ * ================================================================
+ *
+ * Se mantiene separado del parser global para no mezclar el protocolo
+ * de la FSM con payloads de trayectorias.
+ */
+bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd) {
+    if (rawLine == nullptr) {
+        return false;
+    }
+
+    /*
+     * Verifica prefijo obligatorio "G:"
+     */
+    if ((rawLine[0] != 'G') || (rawLine[1] != ':')) {
+        return false;
+    }
+
+    /*
+     * Copiamos el payload a un buffer modificable local.
+     * Ejemplo esperado:
+     *   "1,2,3,1,0,0.5"
+     */
+    char buffer[96] = {0};
+    std::snprintf(buffer, sizeof(buffer), "%s", rawLine + 2);
+
+    /*
+     * Separar exactamente 6 tokens por coma
+     */
+    char* tokens[6] = {nullptr};
+    int tokenCount = 0;
+
+    char* context = nullptr;
+    char* token = strtok_r(buffer, ",", &context);
+
+    while ((token != nullptr) && (tokenCount < 6)) {
+        tokens[tokenCount++] = token;
+        token = strtok_r(nullptr, ",", &context);
+    }
+
+    /*
+     * Deben venir exactamente 6 campos
+     */
+    if (tokenCount != 6) {
+        return false;
+    }
+
+    /*
+     * No deben quedar campos extra
+     */
+    if (strtok_r(nullptr, ",", &context) != nullptr) {
+        return false;
+    }
+
+    char* endPtr = nullptr;
+
+    /*
+     * q1
+     */
+    endPtr = nullptr;
+    const float q1 = std::strtof(tokens[0], &endPtr);
+    if ((endPtr == tokens[0]) || (*endPtr != '\0')) {
+        return false;
+    }
+
+    /*
+     * q2
+     */
+    endPtr = nullptr;
+    const float q2 = std::strtof(tokens[1], &endPtr);
+    if ((endPtr == tokens[1]) || (*endPtr != '\0')) {
+        return false;
+    }
+
+    /*
+     * q3
+     */
+    endPtr = nullptr;
+    const float q3 = std::strtof(tokens[2], &endPtr);
+    if ((endPtr == tokens[2]) || (*endPtr != '\0')) {
+        return false;
+    }
+
+    /*
+     * a1
+     */
+    endPtr = nullptr;
+    const long a1Long = std::strtol(tokens[3], &endPtr, 10);
+    if ((endPtr == tokens[3]) || (*endPtr != '\0')) {
+        return false;
+    }
+    if (!((a1Long == 0) || (a1Long == 1))) {
+        return false;
+    }
+
+    /*
+     * a2
+     */
+    endPtr = nullptr;
+    const long a2Long = std::strtol(tokens[4], &endPtr, 10);
+    if ((endPtr == tokens[4]) || (*endPtr != '\0')) {
+        return false;
+    }
+    if (!((a2Long == 0) || (a2Long == 1))) {
+        return false;
+    }
+
+    /*
+     * v
+     */
+    endPtr = nullptr;
+    const float v = std::strtof(tokens[5], &endPtr);
+    if ((endPtr == tokens[5]) || (*endPtr != '\0')) {
+        return false;
+    }
+
+    /*
+     * Si todo salió bien, almacenamos
+     */
+    outCmd.valid = true;
+    outCmd.q1 = q1;
+    outCmd.q2 = q2;
+    outCmd.q3 = q3;
+    outCmd.a1 = static_cast<uint8_t>(a1Long);
+    outCmd.a2 = static_cast<uint8_t>(a2Long);
+    outCmd.v  = v;
+
+    return true;
 }
 
 /*
@@ -674,6 +811,8 @@ void Controller::onEnterBoot(void) {
 void Controller::onEnterInit(void) {
     Logger::logINFO("FSM -> Init");
     detenerActuadoresManuales();
+    _pendingAutoCommand = {false, 0.0f, 0.0f, 0.0f, 0U, 0U, 0.0f}; /* NUEVO */
+    _hasPendingAutoCommand = false;
 
     /*
      * Init se usa como estado seguro de espera.
@@ -685,6 +824,8 @@ void Controller::onEnterInit(void) {
 void Controller::onEnterIdle(void) {
     Logger::logINFO("FSM -> Idle");
     detenerActuadoresManuales();
+    _pendingAutoCommand = {false, 0.0f, 0.0f, 0.0f, 0U, 0U, 0.0f}; /* NUEVO */
+    _hasPendingAutoCommand = false;
 
     /*
      * Primer ingreso a IDLE:
@@ -721,6 +862,8 @@ void Controller::onEnterRecording(void) {
 void Controller::onEnterAutoReady(void) {
     Logger::logINFO("FSM -> AutoReady");
     detenerActuadoresManuales();
+    _pendingAutoCommand = {false, 0.0f, 0.0f, 0.0f, 0U, 0U, 0.0f}; /* NUEVO */
+    _hasPendingAutoCommand = false;
 }
 
 void Controller::onEnterAutoRunning(void) {
@@ -834,8 +977,27 @@ void Controller::onRecordingCommand(const char* rawCommand) {
 
 void Controller::onAutoReadyCommand(const char* rawCommand) {
     Logger::logINFO("CMD(AUTO_READY): %s", rawCommand);
+
+    PendingAutoCommand parsedCmd{}; /* NUEVO */
+
+    if (!tryParseGCommand(rawCommand, parsedCmd)) { /* NUEVO */
+        Logger::logINFO("AUTO_READY: comando local ignorado o formato G invalido."); /* NUEVO */
+        return; /* NUEVO */
 }
 
+    _pendingAutoCommand = parsedCmd;   /* NUEVO */
+    _hasPendingAutoCommand = true;     /* NUEVO */
+
+    Logger::logINFO(                   /* NUEVO */
+        "AUTO_READY: G almacenado q1=%.3f q2=%.3f q3=%.3f a1=%u a2=%u v=%.3f",
+        _pendingAutoCommand.q1,
+        _pendingAutoCommand.q2,
+        _pendingAutoCommand.q3,
+        static_cast<unsigned>(_pendingAutoCommand.a1),
+        static_cast<unsigned>(_pendingAutoCommand.a2),
+        _pendingAutoCommand.v
+    );
+}
 void Controller::onAutoRunningCommand(const char* rawCommand) {
     Logger::logINFO("CMD(AUTO_RUNNING): %s", rawCommand);
 }
