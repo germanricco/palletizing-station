@@ -71,15 +71,14 @@ Controller::Controller(TerminalSerial& terminal,
       _primerIngresoIdle(true),
       _stateEntryTick(0U),
       _tiempoUltimoEnvioTelemetria(0U),
-      _pendingAutoCommand{false, 0.0f, 0.0f, 0.0f, 0U, 0U},
-      _hasPendingAutoCommand(false),
       _autoFifo{},
       _autoFifoHead(0U),
       _autoFifoTail(0U),
       _autoFifoCount(0U),
-      _activeAutoPoint{false, 0.0f, 0.0f, 0.0f, 0U, 0U},
+      _activeAutoPoint{false, 0.00f, 0.00f, 0.00f},
       _hasActiveAutoPoint(false),
-      _chunkRequestPending(false) {
+      _chunkRequestPending(false),
+	  _waitingFirstChunkAfterStart(false){
 }
 
 /*
@@ -95,8 +94,6 @@ void Controller::init(void) {
     _primerIngresoIdle = true;
     _stateEntryTick = 0U;
     _tiempoUltimoEnvioTelemetria = 0U;
-    _pendingAutoCommand = {false, 0.0f, 0.0f, 0.0f, 0U, 0U};
-    _hasPendingAutoCommand = false;
     clearAutoRuntimeState();
 
     onEnterState(_state);
@@ -276,7 +273,7 @@ UartCommand Controller::parseUartCommand(const char* text) {
 
 /*
  * ================================================================
- * Parser local para comando G:q1,q2,q3,a1,a2
+ * Parser local para comando G:q1,q2,q3
  * ================================================================
  */
 bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd) {
@@ -284,69 +281,75 @@ bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCm
         return false;
     }
 
-    if ((rawLine[0] != 'G') || (rawLine[1] != ':')) {
+    /*
+     * Verifica prefijo obligatorio "G1:"
+     */
+    if ((rawLine[0] != 'G') || (rawLine[1] != '1') || (rawLine[2] != ':')) {
         return false;
     }
 
+    /*
+     * Copiamos el payload a un buffer modificable local.
+     * Ejemplo esperado:
+     *   "0.10,0.20,0.30"
+     */
     char buffer[96] = {0};
-    std::snprintf(buffer, sizeof(buffer), "%s", rawLine + 2);
+    std::snprintf(buffer, sizeof(buffer), "%s", rawLine + 3);  // salta "G1:"
 
-    char* tokens[5] = {nullptr};
+    /*
+     * Separar exactamente 3 tokens por coma
+     */
+    char* tokens[3] = {nullptr};
     int tokenCount = 0;
 
     char* context = nullptr;
     char* token = strtok_r(buffer, ",", &context);
 
-    while ((token != nullptr) && (tokenCount < 5)) {
+    while ((token != nullptr) && (tokenCount < 3)) {
         tokens[tokenCount++] = token;
         token = strtok_r(nullptr, ",", &context);
     }
 
-    if (tokenCount != 5) {
+    /*
+     * Deben venir exactamente 3 campos
+     */
+    if (tokenCount != 3) {
         return false;
     }
 
     /*
-     * Se aceptan silenciosamente campos extra.
-     * Si el emisor manda un sexto campo accidentalmente,
-     * la implementación actual lo ignora a propósito.
+     * No deben quedar campos extra
      */
+    if (strtok_r(nullptr, ",", &context) != nullptr) {
+        return false;
+    }
 
     char* endPtr = nullptr;
 
+    /*
+     * q1
+     */
     endPtr = nullptr;
     const float q1 = std::strtof(tokens[0], &endPtr);
     if ((endPtr == tokens[0]) || (*endPtr != '\0')) {
         return false;
     }
 
+    /*
+     * q2
+     */
     endPtr = nullptr;
     const float q2 = std::strtof(tokens[1], &endPtr);
     if ((endPtr == tokens[1]) || (*endPtr != '\0')) {
         return false;
     }
 
+    /*
+     * q3
+     */
     endPtr = nullptr;
     const float q3 = std::strtof(tokens[2], &endPtr);
     if ((endPtr == tokens[2]) || (*endPtr != '\0')) {
-        return false;
-    }
-
-    endPtr = nullptr;
-    const long a1Long = std::strtol(tokens[3], &endPtr, 10);
-    if ((endPtr == tokens[3]) || (*endPtr != '\0')) {
-        return false;
-    }
-    if (!((a1Long == 0) || (a1Long == 1))) {
-        return false;
-    }
-
-    endPtr = nullptr;
-    const long a2Long = std::strtol(tokens[4], &endPtr, 10);
-    if ((endPtr == tokens[4]) || (*endPtr != '\0')) {
-        return false;
-    }
-    if (!((a2Long == 0) || (a2Long == 1))) {
         return false;
     }
 
@@ -354,8 +357,6 @@ bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCm
     outCmd.q1 = q1;
     outCmd.q2 = q2;
     outCmd.q3 = q3;
-    outCmd.a1 = static_cast<uint8_t>(a1Long);
-    outCmd.a2 = static_cast<uint8_t>(a2Long);
 
     return true;
 }
@@ -381,9 +382,10 @@ void Controller::clearAutoFifo(void) {
 
 void Controller::clearAutoRuntimeState(void) {
     clearAutoFifo();
-    _activeAutoPoint = {false, 0.0f, 0.0f, 0.0f, 0U, 0U};
+    _activeAutoPoint = {false, 0.00f, 0.00f, 0.00f};
     _hasActiveAutoPoint = false;
     _chunkRequestPending = false;
+    _waitingFirstChunkAfterStart = false;
 }
 
 bool Controller::enqueueAutoPoint(const PendingAutoCommand& cmd) {
@@ -422,12 +424,10 @@ void Controller::startNextAutoPointIfNeeded(void) {
     _hasActiveAutoPoint = true;
 
     Logger::logINFO(
-        "AUTO_RUNNING: nuevo punto activo q1=%.3f q2=%.3f q3=%.3f a1=%u a2=%u | fifo_restante=%u",
+        "AUTO_RUNNING: nuevo punto activo q1=%.3f q2=%.3f q3=%.3f| fifo_restante=%u",
         _activeAutoPoint.q1,
         _activeAutoPoint.q2,
         _activeAutoPoint.q3,
-        static_cast<unsigned>(_activeAutoPoint.a1),
-        static_cast<unsigned>(_activeAutoPoint.a2),
         static_cast<unsigned>(_autoFifoCount)
     );
 }
@@ -443,18 +443,20 @@ void Controller::processActiveAutoPoint(void) {
      * Más adelante acá se conectará _activeAutoPoint.q1 al servo real.
      */
     Logger::logINFO(
-        "AUTO_RUNNING: punto consumido q1=%.3f q2=%.3f q3=%.3f a1=%u a2=%u",
+        "AUTO_RUNNING: punto consumido q1=%.3f q2=%.3f q3=%.3f ",
         _activeAutoPoint.q1,
         _activeAutoPoint.q2,
-        _activeAutoPoint.q3,
-        static_cast<unsigned>(_activeAutoPoint.a1),
-        static_cast<unsigned>(_activeAutoPoint.a2)
+        _activeAutoPoint.q3
     );
 
     _hasActiveAutoPoint = false;
 }
 
 void Controller::requestNextChunkIfNeeded(void) {
+
+	if (_waitingFirstChunkAfterStart) {
+	        return;
+	}
     if (_hasActiveAutoPoint) {
         return;
     }
@@ -793,16 +795,12 @@ void Controller::onEnterBoot(void) {
 void Controller::onEnterInit(void) {
     Logger::logINFO("FSM -> Init");
     detenerActuadoresManuales();
-    _pendingAutoCommand = {false, 0.0f, 0.0f, 0.0f, 0U, 0U};
-    _hasPendingAutoCommand = false;
     clearAutoRuntimeState();
 }
 
 void Controller::onEnterIdle(void) {
     Logger::logINFO("FSM -> Idle");
     detenerActuadoresManuales();
-    _pendingAutoCommand = {false, 0.0f, 0.0f, 0.0f, 0U, 0U};
-    _hasPendingAutoCommand = false;
     clearAutoRuntimeState();
 
     if (_primerIngresoIdle) {
@@ -825,8 +823,6 @@ void Controller::onEnterRecording(void) {
 void Controller::onEnterAutoReady(void) {
     Logger::logINFO("FSM -> AutoReady");
     detenerActuadoresManuales();
-    _pendingAutoCommand = {false, 0.0f, 0.0f, 0.0f, 0U, 0U};
-    _hasPendingAutoCommand = false;
     clearAutoRuntimeState();
 }
 
@@ -840,6 +836,7 @@ void Controller::onEnterAutoRunning(void) {
      */
     if (_previousState != GlobalState::AutoPaused) {
         clearAutoRuntimeState();
+        _waitingFirstChunkAfterStart = true;
         Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Esperando puntos G...");
     } else {
         Logger::logINFO("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
@@ -938,16 +935,8 @@ void Controller::onAutoReadyCommand(const char* rawCommand) {
         return;
     }
 
-    _pendingAutoCommand = parsedCmd;
-    _hasPendingAutoCommand = true;
-
     Logger::logINFO(
-        "AUTO_READY: G almacenado q1=%.3f q2=%.3f q3=%.3f a1=%u a2=%u",
-        _pendingAutoCommand.q1,
-        _pendingAutoCommand.q2,
-        _pendingAutoCommand.q3,
-        static_cast<unsigned>(_pendingAutoCommand.a1),
-        static_cast<unsigned>(_pendingAutoCommand.a2)
+        "AUTO_READY: G ignorado. El primer chunk debe llegar despues de ACK_M112 y ya en AUTO_RUNNING."
     );
 }
 
@@ -965,16 +954,17 @@ void Controller::onAutoRunningCommand(const char* rawCommand) {
         Logger::logERROR("AUTO_RUNNING: FIFO llena. Punto descartado.");
         return;
     }
+    // Ya llego el primer chunk o parte de el.
+    _waitingFirstChunkAfterStart = false;
 
+    // Al llegar datos nuevos dejamos de considerar pendiente el pedido anterior.
     _chunkRequestPending = false;
 
     Logger::logINFO(
-        "AUTO_RUNNING: punto encolado q1=%.3f q2=%.3f q3=%.3f a1=%u a2=%u | fifo_count=%u",
+        "AUTO_RUNNING: punto encolado q1=%.3f q2=%.3f q3=%.3f | fifo_count=%u",
         parsedCmd.q1,
         parsedCmd.q2,
         parsedCmd.q3,
-        static_cast<unsigned>(parsedCmd.a1),
-        static_cast<unsigned>(parsedCmd.a2),
         static_cast<unsigned>(_autoFifoCount)
     );
 }
