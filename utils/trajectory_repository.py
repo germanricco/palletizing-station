@@ -30,6 +30,7 @@ class TrajectoryRepository:
             base_name += '.npy'
         return base_name
 
+    
     # ==== OPERACIONES DE PERSISTENCIA ====
     def save_trajectory(self, name: str, trajectory_matrix: np.ndarray) -> bool:
         """

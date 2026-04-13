@@ -44,23 +44,23 @@ class RobotController:
         self.logger = logging.getLogger("STM32_Controller.Orquestador")
         self.logger.info("Iniciando secuencia de arranque de RobotController...")
 
+        # Estado inicial del sistema
         self.current_state: SystemState= SystemState.INIT
         self.recording_buffer: List[List[float]] = []   # Buffer dinamico en RAM para modo RECORDING
         self._pending_save_matrix: Optional[np.ndarray] = None  # Cache para posponer el guardado de trayectoria
 
-        # Componentes
+        # Componentes del sistema
         self.repository = TrajectoryRepository(storage_dir="trajectories", expected_columns=4)
         self.robot = RoboticArmMK2()
         self.uart = AsyncUARTCommunicator(port=port, baudrate=baudrate)
-        self.streamer = TrajectoryStreamer(comm=self.uart, chunk_size=chunk_size)
-
-        # Callback para la recepcion de mensajes serial
-        self.uart.set_rx_callback(self._route_serial_message)
+        self.streamer = TrajectoryStreamer(comm=self.uart, chunk_size=chunk_size, precision=4, num_dofs=3)
 
         # Estado de actuador
         self.actuator_active: bool = False
 
         # Callbacks
+        self.uart.set_rx_callback(self._route_serial_message)
+        self.streamer.progress_callback = self._on_streamer_progress
         self.ui_update_callback = None
         self.prompt_save_callback: Optional[Callable[[str], None]] = None
 
@@ -574,23 +574,49 @@ class RobotController:
         """
         Delega la ejecución de la matriz cacheada al TrajectoryStreamer.
         """
+        # Validacion de estado simulacion
         if self._is_simulating:
             self.logger.info("Abortando simulación para iniciar ejecución real.")
             self._is_simulating = False
             time.sleep(0.05) # Pequeño margen para que muera el hilo
 
+        # Validacion de estados validos
         if self.current_state != SystemState.AUTO_READY:
             self.logger.warning(f"Ejecucion denegada. Incompatibilidad de estado.")
             return False
 
+        # Validacion de trayectoria
         if getattr(self, 'active_trajectory', None) is None or self.active_trajectory.size == 0:
             self.logger.warning("Ejecución denegada. No existe matriz de trayectoria cargada en memoria.")
             return False
 
-        self.logger.debug("Delegando matriz cargada a TrajectoryStreamer...")
+        self.logger.debug("Delegando envio de trayectoria al TrajectoryStreamer.")
         
-        # El TrajectoryStreamer se encarga de inyectar 'M112' en el UART
-        self.streamer.start_streaming(self.active_trajectory)
+        # Copia de seguridad para evitar modificaciones de memoria cache
+        hardware_trajectory = np.copy(self.active_trajectory)
+
+        try:
+            # Iterar y transformar columnas de posicion (q1, q2, q3)
+            for i in range(hardware_trajectory.shape[0]):
+                q1_kin = hardware_trajectory[i, 0]
+                q2_kin = hardware_trajectory[i, 1]
+                q3_kin = hardware_trajectory[i, 2]
+                
+                # Invocamos la transformación inversa (Ajusta el nombre del método según tu clase)
+                s1, s2, s3 = self.robot.kinematic_to_servo(q1_kin, q2_kin, q3_kin)
+                
+                # Sobreescribimos con los valores crudos para el STM32
+                hardware_trajectory[i, 0] = s1
+                hardware_trajectory[i, 1] = s2
+                hardware_trajectory[i, 2] = s3
+
+        except Exception as e:
+            self.logger.error(f"Fallo critico en la transformacion cinematica: {e}")
+            return False
+
+        self.logger.debug("Delegando envio de trayectoria al TrajectoryStreamer.")
+
+        self.streamer.start_streaming(hardware_trajectory)
         return True
 
     def stop_trajectory(self) -> bool:
@@ -623,6 +649,7 @@ class RobotController:
             return False
         
         return self._dispatch_command("M113", "Cancel Trajectory")
+    
     
     # ==== CONTROL DE HERRAMIENTA ====
     def toggle_actuator(self) -> bool:
@@ -664,6 +691,7 @@ class RobotController:
 
         return True
 
+    
     # ==== SIMULACION DE TRAYECTORIAS ====
     def simulate_trajectory(self) -> bool:
         """
@@ -699,12 +727,11 @@ class RobotController:
             dt = 0.02 
 
             for i, point in enumerate(self.active_trajectory):
-                # Permite abortar la simulación a la mitad si el usuario hace clic en Ejecutar o cambia de modo
                 if not self._is_simulating:
                     break
 
                 q1, q2, q3 = point[0], point[1], point[2]
-                valve, pump = bool(point[3]), bool(point[4])
+                is_actuator_on = bool(point[3])
 
                 # Asegura que siempre envie al menos 1% de progreso
                 progress = max(1, int(((i + 1) / total_points) * 100))
@@ -717,7 +744,7 @@ class RobotController:
                         self.robot.get_cartesian_state(),
                         [q1, q2, q3],
                         self.current_state,
-                        {'valve': valve, 'pump': pump},
+                        is_actuator_on,
                         progress
                     )     
                 # Simulamos el paso del tiempo de la grabación
@@ -744,10 +771,10 @@ class RobotController:
         if self.ui_update_callback:
             self.ui_update_callback(
                 self.robot.get_cartesian_state(),
-                self.robot.get_joint_state(), # asumiendo que tienes este getter
+                self.robot.get_joint_state(),
                 self.current_state,
-                self.actuator_state,
-                0 # Reset progreso
+                self.actuator_active,
+                0 
             )
 
     # ==== SEGURIDAD Y EMERGENCIAS ====
@@ -787,3 +814,15 @@ class RobotController:
             self.recording_buffer.clear()
 
         #! NOTA. Para reanudar, se requiere secuencia estricta de reinicio. (ej M99)
+
+
+    # ==== METODOS AUXILIARES ====
+    def _on_streamer_progress(self, progress: int) -> None:
+        if self.ui_update_callback:
+            self.ui_update_callback(
+                self.robot.get_cartesian_state(),
+                self.robot.get_angular_state(),
+                self.current_state,
+                self.actuator_active,             # AHORA usa el booleano
+                progress
+            )
