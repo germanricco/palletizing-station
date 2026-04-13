@@ -49,14 +49,11 @@ class RobotController:
         self.recording_buffer: List[List[float]] = []   # Buffer dinamico en RAM para modo RECORDING
         self._pending_save_matrix: Optional[np.ndarray] = None  # Cache para posponer el guardado de trayectoria
 
-        # Componentes
+        # Componentes del sistema
         self.repository = TrajectoryRepository(storage_dir="trajectories", expected_columns=4)
         self.robot = RoboticArmMK2()
         self.uart = AsyncUARTCommunicator(port=port, baudrate=baudrate)
         self.streamer = TrajectoryStreamer(comm=self.uart, chunk_size=chunk_size, precision=4, num_dofs=3)
-
-        # Callback para la recepcion de mensajes serial
-        self.uart.set_rx_callback(self._route_serial_message)
 
         # Estado de actuador
         self.actuator_active: bool = False
@@ -659,6 +656,7 @@ class RobotController:
             return False
         
         return self._dispatch_command("M113", "Cancel Trajectory")
+    
     
     # ==== CONTROL DE HERRAMIENTA ====
     def toggle_actuator(self) -> bool:
