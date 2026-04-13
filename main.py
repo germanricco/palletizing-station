@@ -52,7 +52,7 @@ def main():
     logging.info("Inicializando Robot Control GUI...")
 
     # 3. Instanciar el Controlador de Hardware
-    TARGET_PORT = "COM6" #"/dev/ttyUSB0"  # Adaptar según el SO (ej. COM3 en Windows)
+    TARGET_PORT = "/dev/ttyUSB0" #"/dev/ttyUSB0"  # Adaptar según el SO (ej. COM3 en Windows)
     BAUD_RATE = 115200
     CHUNK_SIZE = 15
     LOG_LEVEL = logging.INFO
