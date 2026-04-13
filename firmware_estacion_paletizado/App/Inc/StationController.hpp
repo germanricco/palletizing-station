@@ -99,8 +99,6 @@ struct PendingAutoCommand {
     float q1;
     float q2;
     float q3;
-    uint8_t a1;
-    uint8_t a2;
 };
 
 /*
@@ -156,14 +154,6 @@ private:
 
     /*
      * ------------------------------------------------
-     * Punto G individual para pruebas en AUTO_READY
-     * ------------------------------------------------
-     */
-    PendingAutoCommand _pendingAutoCommand;
-    bool _hasPendingAutoCommand;
-
-    /*
-     * ------------------------------------------------
      * NUEVO: FIFO de puntos para AUTO_RUNNING
      * ------------------------------------------------
      */
@@ -176,6 +166,11 @@ private:
     PendingAutoCommand _activeAutoPoint;
     bool _hasActiveAutoPoint;
     bool _chunkRequestPending;
+
+    // NUEVO:
+    // true cuando se acaba de entrar a AUTO_RUNNING desde AUTO_READY
+    // y todavia no llego el primer chunk enviado por Python tras ACK_M112.
+    bool _waitingFirstChunkAfterStart;
 
 private:
     /*
@@ -196,7 +191,7 @@ private:
 
     /*
      * ================================================================
-     * Parser local para G:q1,q2,q3,a1,a2
+     * Parser local para G1:q1,q2,q3
      * ================================================================
      */
     bool tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd);
