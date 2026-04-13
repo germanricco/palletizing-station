@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cctype>
+#include <cstdlib>
 
 namespace Station {
 
@@ -69,20 +70,21 @@ Controller::Controller(TerminalSerial& terminal,
       _initialized(false),
       _primerIngresoIdle(true),
       _stateEntryTick(0U),
-      _tiempoUltimoEnvioTelemetria(0U) {
+      _tiempoUltimoEnvioTelemetria(0U),
+      _autoFifo{},
+      _autoFifoHead(0U),
+      _autoFifoTail(0U),
+      _autoFifoCount(0U),
+      _activeAutoPoint{false, 0.00f, 0.00f, 0.00f},
+      _hasActiveAutoPoint(false),
+      _chunkRequestPending(false),
+	  _waitingFirstChunkAfterStart(false){
 }
 
 /*
  * ================================================================
  * INICIALIZACIÓN GENERAL
  * ================================================================
- *
- * Deja el controlador listo en estado Boot.
- * El avance Boot -> Init ocurre automáticamente durante update().
- *
- * A diferencia del comportamiento anterior, Init ya no transiciona
- * automáticamente a Idle. Ahora Init se usa como estado seguro
- * de espera y sincronización con la PC.
  */
 void Controller::init(void) {
     _state = GlobalState::Boot;
@@ -92,6 +94,7 @@ void Controller::init(void) {
     _primerIngresoIdle = true;
     _stateEntryTick = 0U;
     _tiempoUltimoEnvioTelemetria = 0U;
+    clearAutoRuntimeState();
 
     onEnterState(_state);
 }
@@ -100,39 +103,20 @@ void Controller::init(void) {
  * ================================================================
  * UPDATE PRINCIPAL DEL CONTROLADOR
  * ================================================================
- *
- * Responsabilidades:
- * 1) asegurar inicialización
- * 2) procesar comandos UART pendientes
- * 3) ejecutar transiciones automáticas de arranque
- * 4) ejecutar lógica periódica del estado actual
- * 5) enviar telemetría periódica
  */
 void Controller::update(uint32_t nowMs) {
     if (!_initialized) {
         init();
     }
 
-    /*
-     * ------------------------------------------------
-     * 1) Procesamiento de comandos UART
-     * ------------------------------------------------
-     */
     if (_terminal.hayComandoPendiente()) {
         const char* comando = _terminal.obtenerComandoPendiente();
 
-        /*
-         * STATUS se responde como mensaje normal,
-         * no como ACK/ERR del protocolo.
-         */
         if (std::strcmp(comando, "STATUS") == 0) {
             enviarEstadoActualPorUart();
         } else {
             const CommandResult result = handleUartLine(comando, nowMs);
 
-            /*
-             * ACK / ERR se envían por la cola de alta prioridad.
-             */
             if (result.handled && (result.response[0] != '\0')) {
                 _terminal.enviarACK(result.response);
             }
@@ -141,14 +125,6 @@ void Controller::update(uint32_t nowMs) {
         _terminal.limpiarComandoPendiente();
     }
 
-    /*
-     * ------------------------------------------------
-     * 2) Transiciones automáticas de arranque
-     * ------------------------------------------------
-     *
-     * Solo se mantiene Boot -> Init.
-     * Init ya no pasa automáticamente a Idle.
-     */
     switch (_state) {
         case GlobalState::Boot:
             transitionTo(GlobalState::Init, nowMs);
@@ -158,20 +134,8 @@ void Controller::update(uint32_t nowMs) {
             break;
     }
 
-    /*
-     * ------------------------------------------------
-     * 3) Lógica periódica según estado actual
-     * ------------------------------------------------
-     */
     runCurrentState();
 
-    /*
-     * ------------------------------------------------
-     * 4) Envío de telemetría periódica
-     * ------------------------------------------------
-     *
-     * 20 ms entre envíos -> 50 Hz
-     */
     if ((nowMs - _tiempoUltimoEnvioTelemetria) >= 20U) {
         _tiempoUltimoEnvioTelemetria = nowMs;
         enviarTelemetria();
@@ -263,11 +227,6 @@ const char* Controller::toString(UartCommand command) {
  * ================================================================
  * NORMALIZACIÓN Y PARSEO DE COMANDOS UART
  * ================================================================
- *
- * El parser:
- * - convierte a mayúsculas
- * - elimina espacios, tabs y fin de línea
- * - devuelve un enum
  */
 void Controller::normalizeToUpperNoSpaces(const char* src, char* dst, uint16_t dstSize) {
     if ((src == nullptr) || (dst == nullptr) || (dstSize == 0U)) {
@@ -314,6 +273,210 @@ UartCommand Controller::parseUartCommand(const char* text) {
 
 /*
  * ================================================================
+ * Parser local para comando G:q1,q2,q3
+ * ================================================================
+ */
+bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd) {
+    if (rawLine == nullptr) {
+        return false;
+    }
+
+    /*
+     * Verifica prefijo obligatorio "G1:"
+     */
+    if ((rawLine[0] != 'G') || (rawLine[1] != '1') || (rawLine[2] != ':')) {
+        return false;
+    }
+
+    /*
+     * Copiamos el payload a un buffer modificable local.
+     * Ejemplo esperado:
+     *   "0.10,0.20,0.30"
+     */
+    char buffer[96] = {0};
+    std::snprintf(buffer, sizeof(buffer), "%s", rawLine + 3);  // salta "G1:"
+
+    /*
+     * Separar exactamente 3 tokens por coma
+     */
+    char* tokens[3] = {nullptr};
+    int tokenCount = 0;
+
+    char* context = nullptr;
+    char* token = strtok_r(buffer, ",", &context);
+
+    while ((token != nullptr) && (tokenCount < 3)) {
+        tokens[tokenCount++] = token;
+        token = strtok_r(nullptr, ",", &context);
+    }
+
+    /*
+     * Deben venir exactamente 3 campos
+     */
+    if (tokenCount != 3) {
+        return false;
+    }
+
+    /*
+     * No deben quedar campos extra
+     */
+    if (strtok_r(nullptr, ",", &context) != nullptr) {
+        return false;
+    }
+
+    char* endPtr = nullptr;
+
+    /*
+     * q1
+     */
+    endPtr = nullptr;
+    const float q1 = std::strtof(tokens[0], &endPtr);
+    if ((endPtr == tokens[0]) || (*endPtr != '\0')) {
+        return false;
+    }
+
+    /*
+     * q2
+     */
+    endPtr = nullptr;
+    const float q2 = std::strtof(tokens[1], &endPtr);
+    if ((endPtr == tokens[1]) || (*endPtr != '\0')) {
+        return false;
+    }
+
+    /*
+     * q3
+     */
+    endPtr = nullptr;
+    const float q3 = std::strtof(tokens[2], &endPtr);
+    if ((endPtr == tokens[2]) || (*endPtr != '\0')) {
+        return false;
+    }
+
+    outCmd.valid = true;
+    outCmd.q1 = q1;
+    outCmd.q2 = q2;
+    outCmd.q3 = q3;
+
+    return true;
+}
+
+/*
+ * ================================================================
+ * HELPERS FIFO PARA AUTO_RUNNING
+ * ================================================================
+ */
+bool Controller::isAutoFifoEmpty(void) const {
+    return (_autoFifoCount == 0U);
+}
+
+bool Controller::isAutoFifoFull(void) const {
+    return (_autoFifoCount >= AUTO_FIFO_CAPACITY);
+}
+
+void Controller::clearAutoFifo(void) {
+    _autoFifoHead = 0U;
+    _autoFifoTail = 0U;
+    _autoFifoCount = 0U;
+}
+
+void Controller::clearAutoRuntimeState(void) {
+    clearAutoFifo();
+    _activeAutoPoint = {false, 0.00f, 0.00f, 0.00f};
+    _hasActiveAutoPoint = false;
+    _chunkRequestPending = false;
+    _waitingFirstChunkAfterStart = false;
+}
+
+bool Controller::enqueueAutoPoint(const PendingAutoCommand& cmd) {
+    if (isAutoFifoFull()) {
+        return false;
+    }
+
+    _autoFifo[_autoFifoTail] = cmd;
+    _autoFifoTail = static_cast<uint8_t>((_autoFifoTail + 1U) % AUTO_FIFO_CAPACITY);
+    _autoFifoCount++;
+    return true;
+}
+
+bool Controller::dequeueAutoPoint(PendingAutoCommand& cmd) {
+    if (isAutoFifoEmpty()) {
+        return false;
+    }
+
+    cmd = _autoFifo[_autoFifoHead];
+    _autoFifoHead = static_cast<uint8_t>((_autoFifoHead + 1U) % AUTO_FIFO_CAPACITY);
+    _autoFifoCount--;
+    return true;
+}
+
+void Controller::startNextAutoPointIfNeeded(void) {
+    if (_hasActiveAutoPoint) {
+        return;
+    }
+
+    PendingAutoCommand nextPoint{};
+    if (!dequeueAutoPoint(nextPoint)) {
+        return;
+    }
+
+    _activeAutoPoint = nextPoint;
+    _hasActiveAutoPoint = true;
+
+    Logger::logINFO(
+        "AUTO_RUNNING: nuevo punto activo q1=%.3f q2=%.3f q3=%.3f| fifo_restante=%u",
+        _activeAutoPoint.q1,
+        _activeAutoPoint.q2,
+        _activeAutoPoint.q3,
+        static_cast<unsigned>(_autoFifoCount)
+    );
+}
+
+void Controller::processActiveAutoPoint(void) {
+    if (!_hasActiveAutoPoint) {
+        return;
+    }
+
+    /*
+     * PRIMERA ETAPA:
+     * consumo lógico inmediato para validar el protocolo de streaming.
+     * Más adelante acá se conectará _activeAutoPoint.q1 al servo real.
+     */
+    Logger::logINFO(
+        "AUTO_RUNNING: punto consumido q1=%.3f q2=%.3f q3=%.3f ",
+        _activeAutoPoint.q1,
+        _activeAutoPoint.q2,
+        _activeAutoPoint.q3
+    );
+
+    _hasActiveAutoPoint = false;
+}
+
+void Controller::requestNextChunkIfNeeded(void) {
+
+	if (_waitingFirstChunkAfterStart) {
+	        return;
+	}
+    if (_hasActiveAutoPoint) {
+        return;
+    }
+
+    if (!isAutoFifoEmpty()) {
+        return;
+    }
+
+    if (_chunkRequestPending) {
+        return;
+    }
+
+    _terminal.enviarNormal("REQ_CHUNK\r\n");
+    _chunkRequestPending = true;
+
+    Logger::logINFO("AUTO_RUNNING: FIFO vacia. Enviado REQ_CHUNK.");
+}
+
+/*
+ * ================================================================
  * CONSTRUCCIÓN DE RESPUESTAS ACK / ERR
  * ================================================================
  */
@@ -353,12 +516,6 @@ CommandResult Controller::makeNotHandled(void) {
  * ================================================================
  * TRANSICIÓN DE ESTADO
  * ================================================================
- *
- * Actualiza:
- * - estado previo
- * - estado actual
- * - tick de entrada
- * - flag de cambio
  */
 void Controller::transitionTo(GlobalState newState, uint32_t nowMs) {
     if (_state == newState) {
@@ -426,33 +583,20 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
 
     const UartCommand command = parseUartCommand(rawLine);
 
-    /*
-     * Prioridad absoluta: emergencia
-     */
     if (command == UartCommand::M00_EStop) {
         transitionTo(GlobalState::Emergency, nowMs);
         return makeAck("ACK_M00");
     }
 
-    /*
-     * STATUS se responde por otro camino.
-     */
     if (command == UartCommand::Status) {
         return makeHandledNoReply();
     }
 
-    /*
-     * Si no es un comando global reconocido, se intenta tratar
-     * como comando local del estado actual.
-     */
     if ((command == UartCommand::Unknown) || (command == UartCommand::None)) {
         processStateLocalCommand(rawLine);
         return makeNotHandled();
     }
 
-    /*
-     * En estados críticos se rechazan comandos normales.
-     */
     if (_state == GlobalState::Emergency) {
         return makeErr("ERR:EMERGENCY_ACTIVE");
     }
@@ -461,9 +605,6 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
         return makeErr("ERR:FAULT_ACTIVE");
     }
 
-    /*
-     * Reglas de transición según estado actual.
-     */
     switch (_state) {
         case GlobalState::Init:
             if (command == UartCommand::M99_GoIdle) {
@@ -603,43 +744,26 @@ void Controller::processStateLocalCommand(const char* rawLine) {
  * FUNCIONES AUXILIARES DE LA ESTACIÓN
  * ================================================================
  */
-
-/*
- * Detiene el movimiento manual del servo.
- */
 void Controller::detenerActuadoresManuales(void) {
     _servoBase.setVelocityCommand(0.0f);
 }
 
-/*
- * Se deja por estructura y documentación.
- * La inicialización real del servo ocurre en main_cpp.cpp.
- */
 void Controller::realizarServoInitInicial(void) {
     /* Intencionalmente vacío */
 }
 
-/*
- * Lleva el servo a HOME.
- */
 void Controller::realizarGoHomeNormal(void) {
     _servoBase.goHome();
 }
 
-/*
- * Envía telemetría periódica por UART.
- *
- * Formato actual:
- *   T:j1,j2,j3,a1,a2
- */
 void Controller::enviarTelemetria(void) {
     char msg[96];
 
     const float j1_rad = _servoBase.getAngleRadians();
-    const float j2_rad = 1.57f;   // TODO: integrar servo 2
-    const float j3_rad = -1.57f;   // TODO: integrar servo 3
-    const int a1 = 0;            // TODO: integrar bomba de vacío
-    const int a2 = 0;            // TODO: integrar solenoide
+    const float j2_rad = 1.20f;   // TODO: integrar servo 2
+    const float j3_rad = -2.00f;  // TODO: integrar servo 3
+    const int a1 = 0;             // TODO: integrar bomba de vacío
+    const int a2 = 0;             // TODO: integrar solenoide
 
     std::snprintf(msg, sizeof(msg),
                   "T:%.2f,%.2f,%.2f,%d,%d\r\n",
@@ -648,9 +772,6 @@ void Controller::enviarTelemetria(void) {
     _terminal.enviarNormal(msg);
 }
 
-/*
- * Envía el estado actual y el anterior por UART.
- */
 void Controller::enviarEstadoActualPorUart(void) {
     char msg[96];
 
@@ -674,28 +795,14 @@ void Controller::onEnterBoot(void) {
 void Controller::onEnterInit(void) {
     Logger::logINFO("FSM -> Init");
     detenerActuadoresManuales();
-
-    /*
-     * Init se usa como estado seguro de espera.
-     * No se hace HOME automáticamente al entrar aquí.
-     * Tampoco se envían mensajes extra por UART.
-     */
+    clearAutoRuntimeState();
 }
 
 void Controller::onEnterIdle(void) {
     Logger::logINFO("FSM -> Idle");
     detenerActuadoresManuales();
+    clearAutoRuntimeState();
 
-    /*
-     * Primer ingreso a IDLE:
-     * no repetimos init del servo.
-     * En ingresos posteriores sí hacemos goHome().
-     *
-     * Nota:
-     * si querés que también haga HOME en el primer ingreso a Idle
-     * cuando venga desde Init, entonces habría que ajustar esta lógica.
-     * Por ahora se mantiene el comportamiento previo del proyecto.
-     */
     if (_primerIngresoIdle) {
         realizarServoInitInicial();
         _primerIngresoIdle = false;
@@ -710,22 +817,30 @@ void Controller::onEnterManual(void) {
 
 void Controller::onEnterRecording(void) {
     Logger::logINFO("FSM -> Recording");
-
-    /*
-     * La grabación arranca llevando el sistema a HOME
-     * como referencia inicial conocida.
-     */
     realizarGoHomeNormal();
 }
 
 void Controller::onEnterAutoReady(void) {
     Logger::logINFO("FSM -> AutoReady");
     detenerActuadoresManuales();
+    clearAutoRuntimeState();
 }
 
 void Controller::onEnterAutoRunning(void) {
     Logger::logINFO("FSM -> AutoRunning");
     detenerActuadoresManuales();
+
+    /*
+     * Al iniciar playback desde AutoReady queremos arrancar limpio.
+     * Si venimos desde AutoPaused por M114, preservamos FIFO y punto activo.
+     */
+    if (_previousState != GlobalState::AutoPaused) {
+        clearAutoRuntimeState();
+        _waitingFirstChunkAfterStart = true;
+        Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Esperando puntos G...");
+    } else {
+        Logger::logINFO("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
+    }
 }
 
 void Controller::onEnterAutoPaused(void) {
@@ -736,12 +851,14 @@ void Controller::onEnterAutoPaused(void) {
 void Controller::onEnterFault(void) {
     Logger::logERROR("FSM -> Fault");
     detenerActuadoresManuales();
+    clearAutoRuntimeState();
     _terminal.enviarNormal("EVT:FAULT\r\n");
 }
 
 void Controller::onEnterEmergency(void) {
     Logger::logERROR("FSM -> Emergency");
     detenerActuadoresManuales();
+    clearAutoRuntimeState();
     _terminal.enviarNormal("EVT:EMERGENCY\r\n");
 }
 
@@ -751,12 +868,6 @@ void Controller::onEnterEmergency(void) {
  * ================================================================
  */
 void Controller::onUpdateInit(void) {
-    /*
-     * En Init el sistema queda en espera segura:
-     * - sin movimiento manual
-     * - sin HOME automático
-     * - esperando M99 para pasar a Idle
-     */
     detenerActuadoresManuales();
 }
 
@@ -765,15 +876,8 @@ void Controller::onUpdateIdle(void) {
 }
 
 void Controller::onUpdateManual(void) {
-    /*
-     * En modo manual, el joystick controla la velocidad del servo.
-     */
     _servoBase.setVelocityCommand(_joystickIzquierdo.ObtenerX());
 
-    /*
-     * Ejemplo actual:
-     * si se detecta pulsación válida, se conmuta un LED.
-     */
     if (_joystickIzquierdo.HayPulsacionValida()) {
         Logger::logINFO("MANUAL: pulsador izq accionado. Conmutando LED.");
         HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1);
@@ -781,17 +885,7 @@ void Controller::onUpdateManual(void) {
 }
 
 void Controller::onUpdateRecording(void) {
-    /*
-     * En grabación, el operador sigue moviendo manualmente
-     * el eje mientras el sistema queda listo para registrar
-     * la trayectoria.
-     */
     _servoBase.setVelocityCommand(_joystickIzquierdo.ObtenerX());
-
-    /*
-     * TODO:
-     * Guardar puntos de trayectoria en memoria o buffer.
-     */
 }
 
 void Controller::onUpdateAutoReady(void) {
@@ -801,10 +895,9 @@ void Controller::onUpdateAutoReady(void) {
 void Controller::onUpdateAutoRunning(void) {
     detenerActuadoresManuales();
 
-    /*
-     * TODO:
-     * Ejecutar trayectoria automática.
-     */
+    startNextAutoPointIfNeeded();
+    processActiveAutoPoint();
+    requestNextChunkIfNeeded();
 }
 
 void Controller::onUpdateAutoPaused(void) {
@@ -834,10 +927,46 @@ void Controller::onRecordingCommand(const char* rawCommand) {
 
 void Controller::onAutoReadyCommand(const char* rawCommand) {
     Logger::logINFO("CMD(AUTO_READY): %s", rawCommand);
+
+    PendingAutoCommand parsedCmd{};
+
+    if (!tryParseGCommand(rawCommand, parsedCmd)) {
+        Logger::logINFO("AUTO_READY: comando local ignorado o formato G invalido.");
+        return;
+    }
+
+    Logger::logINFO(
+        "AUTO_READY: G ignorado. El primer chunk debe llegar despues de ACK_M112 y ya en AUTO_RUNNING."
+    );
 }
 
 void Controller::onAutoRunningCommand(const char* rawCommand) {
     Logger::logINFO("CMD(AUTO_RUNNING): %s", rawCommand);
+
+    PendingAutoCommand parsedCmd{};
+
+    if (!tryParseGCommand(rawCommand, parsedCmd)) {
+        Logger::logINFO("AUTO_RUNNING: comando local ignorado o formato G invalido.");
+        return;
+    }
+
+    if (!enqueueAutoPoint(parsedCmd)) {
+        Logger::logERROR("AUTO_RUNNING: FIFO llena. Punto descartado.");
+        return;
+    }
+    // Ya llego el primer chunk o parte de el.
+    _waitingFirstChunkAfterStart = false;
+
+    // Al llegar datos nuevos dejamos de considerar pendiente el pedido anterior.
+    _chunkRequestPending = false;
+
+    Logger::logINFO(
+        "AUTO_RUNNING: punto encolado q1=%.3f q2=%.3f q3=%.3f | fifo_count=%u",
+        parsedCmd.q1,
+        parsedCmd.q2,
+        parsedCmd.q3,
+        static_cast<unsigned>(_autoFifoCount)
+    );
 }
 
 void Controller::onAutoPausedCommand(const char* rawCommand) {
