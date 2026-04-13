@@ -220,11 +220,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'control_panel_widget'):
             # Llamada estándar para actualizar Segmented Controls y botones base
             self.control_panel_widget.update_machine_state(current_state)
-            
+            self.control_panel_widget.update_actuator_state(actuator_active)
+
             # Enrutamiento de la telemetría dual al panel
             if cartesian_state is not None and cartesian_state.shape[0] > 0:
-                # Usamos [-1] para obtener siempre la última fila (el TCP/Efector Final),
-                # esto evita un IndexError si el robot tiene 3 GDL (4 filas) en vez de 6.
                 tcp_coords = cartesian_state[-1].tolist()
                 self.control_panel_widget.update_telemetry(joints, tcp_coords)
 

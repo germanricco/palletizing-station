@@ -69,7 +69,7 @@ class RobotController:
         self._is_simulating = False
         self._simulation_thread = None
 
-        self.logger.info("RobotController ensamblado con exito. Estado actual: {self.current_state.value}.")
+        self.logger.info("RobotController ensamblado con exito.")
     
     @property
     def is_connected(self) -> bool:
@@ -280,6 +280,13 @@ class RobotController:
             "ACK_M115": SystemState.AUTO_RUNNING     # Reanudacion de trajectoria
         }
 
+        # ACKs que son válidos pero no alteran la máquina de estados principal
+        ignored_state_acks = ["ACK_M3", "ACK_M5"]
+
+        if ack_msg in ignored_state_acks:
+            self.logger.debug(f"Confirmación de actuador recibida: {ack_msg}")
+            return
+
         new_state = mapping.get(ack_msg)
 
         if new_state:
@@ -287,9 +294,9 @@ class RobotController:
             self._change_internal_state(new_state)
 
             if ack_msg == "ACK_M115":
-                self.logger.debug("Trayectoria reanudada. Se reactiva REQ_CHUNK del microcontrolador.")
+                self.logger.debug("Trayectoria reanudada. El flujo de REQ_CHUNK se reactivará desde el hardware.")
         else:
-            self.logger.warning(f"ACK de estado desconocido o no gestionado: {ack_msg}.")
+            self.logger.warning(f"ACK no reconocido: {ack_msg}.")
 
     
     # ==== MAQUINA DE ESTADOS (STATE MANAGER) ====
