@@ -49,11 +49,14 @@ class RobotController:
         self.recording_buffer: List[List[float]] = []   # Buffer dinamico en RAM para modo RECORDING
         self._pending_save_matrix: Optional[np.ndarray] = None  # Cache para posponer el guardado de trayectoria
 
-        # Componentes del sistema
+        # Componentes
         self.repository = TrajectoryRepository(storage_dir="trajectories", expected_columns=4)
         self.robot = RoboticArmMK2()
         self.uart = AsyncUARTCommunicator(port=port, baudrate=baudrate)
         self.streamer = TrajectoryStreamer(comm=self.uart, chunk_size=chunk_size, precision=4, num_dofs=3)
+
+        # Callback para la recepcion de mensajes serial
+        self.uart.set_rx_callback(self._route_serial_message)
 
         # Estado de actuador
         self.actuator_active: bool = False
@@ -657,7 +660,6 @@ class RobotController:
         
         return self._dispatch_command("M113", "Cancel Trajectory")
     
-    
     # ==== CONTROL DE HERRAMIENTA ====
     def toggle_actuator(self) -> bool:
         """
@@ -674,6 +676,29 @@ class RobotController:
                 f"El estado '{self.current_state.value}' no permite control manual."
             )
             return False
+
+        if not self.is_connected:
+            self.logger.warning("Comando denegado: El sistema está desconectado.")
+            return False
+
+        if self.actuator_active:
+            cmd = "M5"
+            action_desc = "Apagar Actuador (Soltar)"
+        else:
+            cmd = "M3"
+            action_desc = "Encender Actuador (Agarrar)"
+
+        self.logger.info(f"Solicitando {action_desc} (Comando {cmd})...")
+        
+        # Nota: Usamos uart.send_message directamente y no _dispatch_command() 
+        # porque M3/M5 no representan una transición de la Máquina de Estados
+        transmission_success = self.uart.send_message(cmd)
+        
+        if not transmission_success:
+            self.logger.error(f"Fallo de comunicación: Buffer TX lleno al intentar enviar {cmd}.")
+            return False
+
+        return True
 
         if not self.is_connected:
             self.logger.warning("Comando denegado: El sistema está desconectado.")

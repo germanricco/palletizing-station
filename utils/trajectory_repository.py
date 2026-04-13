@@ -17,7 +17,9 @@ class TrajectoryRepository:
             expected_columns: Dimension D de la matriz (N, D)
         """
         self.storage_dir = storage_dir
+
         self.expected_columns = expected_columns
+
         os.makedirs(self.storage_dir, exist_ok=True)
         self.logger = logging.getLogger("STM32_Controller.TrajectoryRepo")
 
