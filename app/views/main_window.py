@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
     
     
     # ==== ENRUTAMIENTO DE DATOS ==== 
-    def update_dashboard(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict, progress: int) -> None:
+    def update_dashboard(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_active: bool, progress: int) -> None:
         """
         Slot principal (Thread-Safe) que actualiza toda la interfaz gráfica.
         Recibe la telemetría del controlador y la distribuye a los widgets secundarios.
@@ -174,18 +174,17 @@ class MainWindow(QMainWindow):
             cartesian_state (np.ndarray): Coordenadas XYZ de todos las articulaciones.
             joints (list[float]): Angulos de todas las articulaciones.
             current_state (SystemState): Estado lógico de la máquina (IDLE, MANUAL, etc.).
-            actuator_state (dict): Estado booleano de la bomba de vacío y válvula.
+            actuator_active (bool): Estado booleano del actuador.
             progress (int): progreso de la trayectoria
         """
         state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
         
-        #! Detectamos sub-estado de simulacion
+        # Detectamos sub-estado de simulacion
         is_simulating = (state_name == "AUTO_READY" and progress > 0)
 
         # GESTION DE TERMINAL Y SEGURIDAD MANUAL
         is_safe_for_manual = state_name in ["IDLE", "MANUAL", "AUTO_READY", "RECORDING"]
         
-        #!
         if is_simulating:
             is_safe_for_manual = False
             
@@ -199,15 +198,22 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(progress)
             # Cambiar color si es ejecución real vs simulación
             color = "#34C759" if state_name == "AUTO_RUNNING" else "#00F0FF"
-            self.progress_bar.setStyleSheet(self.progress_bar.styleSheet().replace("#00F0FF", color))
+            self.progress_bar.setStyleSheet(f"""
+                QProgressBar {{
+                    background-color: #1A1A1A;
+                    border: none;
+                }}
+                QProgressBar::chunk {{
+                    background-color: {color}; 
+                }}
+            """)
         else:
             self.progress_bar.hide()
             self.progress_bar.setValue(0)
 
-
         # ENRUTAMIENTO AL GEMELO DIGITAL
         if hasattr(self, 'digital_twin_widget'):
-            self.digital_twin_widget.process_telemetry(cartesian_state, joints, state_name, actuator_state)
+            self.digital_twin_widget.process_telemetry(cartesian_state, joints, state_name, actuator_active)
 
         
         # ENRUTAMIENTO Y SOBREESCRITURA DEL PANEL DE CONTROL
@@ -216,12 +222,12 @@ class MainWindow(QMainWindow):
             self.control_panel_widget.update_machine_state(current_state)
             
             # Enrutamiento de la telemetría dual al panel
-            if getattr(cartesian_state, 'shape', (0,))[0] >= 6:
-                tcp_coords = cartesian_state[5].tolist()
+            if cartesian_state is not None and cartesian_state.shape[0] > 0:
+                # Usamos [-1] para obtener siempre la última fila (el TCP/Efector Final),
+                # esto evita un IndexError si el robot tiene 3 GDL (4 filas) en vez de 6.
+                tcp_coords = cartesian_state[-1].tolist()
                 self.control_panel_widget.update_telemetry(joints, tcp_coords)
-            # --- Inyección de Lógica Visual para la Simulación ---
-            # Como la interfaz de simulación vive en el panel, pero el panel 
-            # no conoce la variable "progress", lo ajustamos desde aquí:
+
             if is_simulating:
                 # Muestra el botón [DETENER SIM.]
                 self.control_panel_widget.stack_abort.setCurrentIndex(1)
@@ -234,7 +240,6 @@ class MainWindow(QMainWindow):
                 # Habilitamos [EJECUTAR] ya que hay una trayectoria validada
                 self.control_panel_widget._set_button_enabled(self.control_panel_widget.btn_execute, True)
         
-
         # ENRUTAMIENTO AL PANEL DE SEGURIDAD
         if hasattr(self, 'safety_panel_widget'):
             self.safety_panel_widget.update_safety_status(state_name)

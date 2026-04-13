@@ -26,7 +26,7 @@ class SignalBridge(QObject):
     """
     Puente de señales para garantizar la seguridad entre hilos.
     """
-    telemetry_received = Signal(np.ndarray, list, object, dict, int)    # telemetria
+    telemetry_received = Signal(np.ndarray, list, object, bool, int)    # telemetria
     trajectory_loaded = Signal(str)      # trayectoria cargada, emite el nombre del archivo
     prompt_save_requested = Signal(str)  # solicitar nombre de guardado
 
@@ -57,7 +57,7 @@ class RobotGUIApp:
         # Memoria de Estados Criticos
         self._last_state_name = ""
         self._last_progress = 0
-        self._last_actuators = {'valve': False, 'pump': False}
+        self._last_actuator_state = False
         
         self._apply_styles()
         self._setup_connections()
@@ -138,34 +138,31 @@ class RobotGUIApp:
         
 
     # ==== METODOS PUENTE (THREAD-SAFE WRAPPERS) ====
-    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_state: dict, progress=0) -> None:
+    def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_active: bool, progress=0) -> None:
         """
         Invocado por el hilo RX del AsyncUARTCommunicator. 
         Cruza la barrera de hilos emitiendo la señal Qt.
         """
         now = time.time()
-        
         state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
         
-        # 1. Evaluacion de Bypass
+        # Evaluacion de Bypass
         is_critical_change = (
             (state_name != self._last_state_name) or 
-            (actuator_state != self._last_actuators) or
+            (actuator_active != self._last_actuator_state) or
             (progress == 0 and self._last_progress > 0) or 
             (progress > 0 and self._last_progress == 0)
         )
         
-        # 2. Puerta Logica
+        # Puerta Logica
         if is_critical_change or (now - self._last_telemetry_time) >= self._ui_refresh_rate:
-            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_state, progress)
+            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_active, progress)
             
             # Actualizamos la memoria interna
             self._last_telemetry_time = now
             self._last_state_name = state_name
             self._last_progress = progress
-            
-            # Copiamos el diccionario para evitar referencias en memoria
-            self._last_actuators = actuator_state.copy()
+            self._last_actuator_state = actuator_active
 
     def _on_trajectory_loaded(self, filename: str) -> None:
         """
