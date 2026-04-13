@@ -68,6 +68,8 @@ class ControlPanel(QWidget):
         self._is_connected = False      # Estado logico interno de la UI
         self._jog_mode = "ARTICULAR"    # Estado del sistema de coordenadas
 
+        self._actuator_is_on = False  # Estado de los actuadores (para lógica de botones)
+
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -203,10 +205,9 @@ class ControlPanel(QWidget):
         header_layout.addStretch()
         header_layout.addWidget(self.btn_jog_mode)
 
-        # Agregamos header al layout principal
         layout.addLayout(header_layout)
 
-        # --- TARJETAS ---
+        # --- TARJETAS DE EJES ---
         self.cards = [
             JoggingCard(axis_id=0),
             JoggingCard(axis_id=1),
@@ -218,6 +219,45 @@ class ControlPanel(QWidget):
             card.request_step.connect(lambda step, axis=i: self.request_jog.emit(self._jog_mode, axis, step))
             layout.addWidget(card)
         
+        # --- TARJETA DE ACTUADOR FINAL ---
+        self.frame_actuator = QFrame()
+        self.frame_actuator.setFixedHeight(64) # Altura fija para mantener proporción con las JoggingCards
+        self.frame_actuator.setStyleSheet(
+            f"QFrame {{"
+            f"  background-color: #1A1A1A;"
+            f"  border: 1px solid {AppConfig.COLORS.BORDERS};"
+            f"  border-radius: 8px;"
+            f"}}"
+        )
+        
+        actuator_layout = QHBoxLayout(self.frame_actuator)
+        actuator_layout.setContentsMargins(16, 0, 16, 0)
+        
+        # Etiqueta de la herramienta
+        lbl_actuator = QLabel("ACTUADOR FINAL")
+        lbl_actuator.setStyleSheet(
+            f"color: {AppConfig.COLORS.TEXT_MED};"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+            f"font-size: 14px;"
+            f"font-weight: {AppConfig.TYPOGRAPHY.WEIGHT_SEMIBOLD};"
+            f"border: none;"
+        )
+        
+        # Botón Toggle
+        self.btn_actuator = QPushButton("APAGADO")
+        self.btn_actuator.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_actuator.setFixedSize(100, 36)
+        self.btn_actuator.clicked.connect(self._on_actuator_clicked)
+        
+        # Aplicamos el estilo inicial (Apagado)
+        self._update_actuator_button_style()
+        
+        actuator_layout.addWidget(lbl_actuator)
+        actuator_layout.addStretch()
+        actuator_layout.addWidget(self.btn_actuator)
+        
+        layout.addWidget(self.frame_actuator)
+
         # Empuja todo hacia arriba si sobra espacion en la seccion
         layout.addStretch()
         return container
@@ -395,6 +435,31 @@ class ControlPanel(QWidget):
             
         btn.setStyleSheet(base_style)
 
+    def _update_actuator_button_style(self) -> None:
+        """Aplica estilos dinámicos dependiendo de si está encendido o apagado."""
+        if self._actuator_is_on:
+            self.btn_actuator.setText("ENCENDIDO")
+            self.btn_actuator.setStyleSheet(
+                f"background-color: rgba(0, 240, 255, 0.15);" # Fondo cian translúcido
+                f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};" # Cian brillante
+                f"border: 1px solid {AppConfig.COLORS.SEMANTIC_MANUAL};"
+                f"border-radius: 4px;"
+                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+                f"font-weight: bold;"
+                f"font-size: 12px;"
+            )
+        else:
+            self.btn_actuator.setText("APAGADO")
+            self.btn_actuator.setStyleSheet(
+                f"background-color: #2A2A2A;"
+                f"color: #A0A0A0;"
+                f"border: none;"
+                f"border-radius: 4px;"
+                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+                f"font-weight: bold;"
+                f"font-size: 12px;"
+            )
+    
     
     # ==== ACTUALIZACIONES DE ESTADO (SLOTS UI) ====
     def update_machine_state(self, current_state) -> None:
@@ -535,7 +600,16 @@ class ControlPanel(QWidget):
             for i in range(3):
                 self.cards[i].update_value(data_source[i])
 
+    def update_actuator_state(self, is_on: bool) -> None:
+        """
+        Llamado asíncronamente por el backend si el actuador cambia de estado
+        por motivos externos (ej. Telemetría o Rutina automática).
+        """
+        if self._actuator_is_on != is_on:
+            self._actuator_is_on = is_on
+            self._update_actuator_button_style()
 
+            
     # ==== EVENTOS DE INTERACCION (CLICKS) ====
     def _on_toggle_jog_mode(self) -> None:
         """Cambia el sistema de coordenadas y actualiza la UI."""
@@ -570,11 +644,19 @@ class ControlPanel(QWidget):
             trajectory_name = Path(file_path).stem 
             self.request_load_trajectory.emit(trajectory_name)
 
-    #? Hay que quitarlo
     def _on_toggle_clicked(self) -> None:
         """Slot interno que emite la intención del usuario hacia el orquestador."""
         # Si NO estamos conectados, solicitamos conexión (True), y viceversa.
         self.request_connection.emit(not self._is_connected)
+
+    def _on_actuator_clicked(self) -> None:
+        """Invierte el estado interno y emite la orden al backend."""
+        # Cambiamos el estado local de la UI de forma predictiva para mejor UX
+        self._actuator_is_on = not self._actuator_is_on
+        self._update_actuator_button_style()
+        
+        # Emitimos la orden al orquestador (True = Encender, False = Apagar)
+        self.request_toggle_actuator.emit(self._actuator_is_on)
 
 
 
