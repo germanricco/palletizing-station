@@ -82,7 +82,7 @@ class DigitalTwin(QWidget):
         )
         
         # Estado Lógico
-        self.lbl_state = QLabel("ESTADO: IDLE")
+        self.lbl_state = QLabel("ESTADO: INIT")
         self.lbl_state.setStyleSheet(
             f"color: {AppConfig.COLORS.TEXT_HIGH};"
             f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
@@ -90,11 +90,10 @@ class DigitalTwin(QWidget):
         )
 
         # Actuadores (Pills)
-        self.lbl_act1 = self._create_actuator_pill("ACT 1: ENABLED", AppConfig.COLORS.SEMANTIC_MANUAL)
-        self.lbl_act2 = self._create_actuator_pill("ACT 2: ENABLED", AppConfig.COLORS.SEMANTIC_MANUAL)
+        self.lbl_actuator = self._create_actuator_pill("HERRAMIENTA: DISABLED", AppConfig.COLORS.BORDERS)
 
         # Agregamos los widgets al Layout del HUD Izquierdo
-        for widget in [self.lbl_link, self.lbl_state, self.lbl_act1, self.lbl_act2]:
+        for widget in [self.lbl_link, self.lbl_state, self.lbl_actuator]:
             hud_left_layout.addWidget(widget)
 
         self.hud_left.adjustSize()
@@ -184,7 +183,7 @@ class DigitalTwin(QWidget):
 
     
     # ==== API PUBLICA (SLOTS) ====
-    def process_telemetry(self, cartesian_state: np.ndarray, joints: list[float], state_name: str, actuator_state: dict) -> None:
+    def process_telemetry(self, cartesian_state: np.ndarray, joints: list[float], state_name: str, actuator_active: bool) -> None:
         """
         Procesa el pipeline completo de actualización visual para el Gemelo Digital.
         
@@ -192,22 +191,25 @@ class DigitalTwin(QWidget):
             cartesian_state (np.ndarray): Matriz (6, 3) con posiciones X, Y, Z.
             joints (list[float]): Lista con los ángulos [J1, J2, J3].
             state_name (str): Nombre del estado lógico actual (ej. "IDLE").
-            actuator_state (dict): Diccionario con estados booleanos {'valve': bool, 'pump': bool}.
+            actuator_active (bool): Estado logico del actuador
         """
         try:
             # Actualizar Canvas 3D
             self.canvas_3d.draw_robot(cartesian_state)
 
             # Extraer el TCP
-            if getattr(cartesian_state, 'shape', (0,))[0] >= 6:
-                tcp_coords = cartesian_state[5].tolist()
+            if cartesian_state is not None and cartesian_state.shape[0] > 0:
+                # Usamos [-1] para asegurar que siempre tomamos la última coordenada (Efector Final)
+                # sin importar si el modelo tiene 4 o 6 eslabones
+                tcp_coords = cartesian_state[-1].tolist()
                 self._update_kinematics(joints, tcp_coords)
             else:
-                # Si array está incompleto, pasamos listas vacías
+                # Fallback de seguridad si la matriz llega corrupta o vacía
                 self._update_kinematics(joints, [0.0, 0.0, 0.0])
 
-            # Actualizar HUD Izquierdo (Estados y Actuadores)
-            self._update_hud_status(state_name, actuator_state)
+            # 3. Actualizar HUD Izquierdo (Estados y Actuadores)
+            # Pasamos el booleano directamente
+            self._update_hud_status(state_name, actuator_active)
 
         except Exception as e:
             logging.error(f"Error procesando telemetría en DigitalTwin: {e}")
@@ -231,30 +233,36 @@ class DigitalTwin(QWidget):
 
     
     # ==== ACTUALIZADORES INTERNOS (HELPERS) ====
-    def _update_hud_status(self, state_name: str, actuator_state: dict) -> None:
+    def _update_hud_status(self, state_name: str, actuator_active: bool) -> None:
         """
-        Actualiza el panel izquierdo (Modo de la máquina y actuadores finales).
+        Actualiza el panel izquierdo (Modo de la máquina y actuador final unificado).
         """
-        # Lógica de colores
+        # 1. Mapeo de colores semánticos
         color_map = {
+            "INIT": AppConfig.COLORS.TEXT_MED,
             "IDLE": AppConfig.COLORS.TEXT_MED,
             "MANUAL": AppConfig.COLORS.SEMANTIC_MANUAL,
             "RECORDING": AppConfig.COLORS.SEMANTIC_RECORD,
             "AUTO_RUNNING": AppConfig.COLORS.SEMANTIC_AUTO,
-            "E_STOP": AppConfig.COLORS.SEMANTIC_ESTOP
+            "AUTO_READY": "#34C759", # O tu constante AppConfig equivalente
+            "FAULT": AppConfig.COLORS.SEMANTIC_ESTOP,
+            "EMERGENCY": AppConfig.COLORS.SEMANTIC_ESTOP
         }
+        
         state_color = color_map.get(state_name, AppConfig.COLORS.TEXT_HIGH)
 
-        # Actualizar Etiqueta de Estado
+        # 2. Actualizar Etiqueta de Estado
         self.lbl_state.setText(f"ESTADO: {state_name}")
-        self.lbl_state.setStyleSheet(f"color: {state_color}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; border: none; background: transparent;")
+        self.lbl_state.setStyleSheet(
+            f"color: {state_color}; "
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; "
+            f"border: none; "
+            f"background: transparent; "
+            f"font-weight: bold;"
+        )
 
-        # Actualizar Pills de Actuadores
-        valve_active = actuator_state.get('valve', False)
-        pump_active = actuator_state.get('pump', False)
-
-        self._refresh_actuator_pill(self.lbl_act1, "VÁLVULA (A1)", valve_active)
-        self._refresh_actuator_pill(self.lbl_act2, "BOMBA VAC. (A2)", pump_active)
+        # 3. Actualizar Pill del Actuador Unificado
+        self._refresh_actuator_pill(self.lbl_actuator, "HERRAMIENTA", actuator_active)
 
     def _refresh_actuator_pill(self, label: QLabel, name: str, is_active: bool) -> None:
         """
