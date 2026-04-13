@@ -49,7 +49,7 @@ class RobotController:
         self._pending_save_matrix: Optional[np.ndarray] = None  # Cache para posponer el guardado de trayectoria
 
         # Componentes
-        self.repository = TrajectoryRepository(storage_dir="trajectories")
+        self.repository = TrajectoryRepository(storage_dir="trajectories", expected_columns=4)
         self.robot = RoboticArmMK2()
         self.uart = AsyncUARTCommunicator(port=port, baudrate=baudrate)
         self.streamer = TrajectoryStreamer(comm=self.uart, chunk_size=chunk_size)
@@ -57,7 +57,8 @@ class RobotController:
         # Callback para la recepcion de mensajes serial
         self.uart.set_rx_callback(self._route_serial_message)
 
-        self.actuator_state = {'valve': False, 'pump': False}
+        # Estado de actuador
+        self.actuator_active: bool = False
 
         # Callbacks
         self.ui_update_callback = None
@@ -194,30 +195,34 @@ class RobotController:
             partes = data_str.split(',')
 
             # Defensa contra truncamiento de trama UART
-            if len(partes) != 5:
+            if len(partes) != 4:
                 self.logger.warning(f"Descarte de Telemetria. Longitud de trama anomala: '{data_str}'.")
                 return
             
             # Conversion de tipos
-            q1, q2, q3 = float(partes[0]), float(partes[1]), float(partes[2])
-            a1_valve, a2_pump = bool(int(partes[3])), bool(int(partes[4]))
+            s1, s2, s3 = float(partes[0]), float(partes[1]), float(partes[2])
+            is_actuator_on = bool(int(partes[3]))
 
             # Si estamos simulando ignoramos la telemetria
             if self._is_simulating:
                 return
             
+            # Crea vector de estado articular
+            servos_array = np.array([s1, s2, s3], dtype=np.float32)
+            # Convierte a valores cinematicos
+            kin_array = self.robot.servo_to_kinematic(servos_array)
+
             # Actualizar estado del Digital Twin
-            self.robot.update_state(q1, q2, q3)
+            self.robot.update_state(kin_array[0], kin_array[1], kin_array[2])
 
             # Almacenar estado logico de actuadores en diccionario
-            self.actuator_state['valve'] = a1_valve
-            self.actuator_state['pump'] = a2_pump
+            self.actuator_active = is_actuator_on
 
             # Persistencia en Memoria (Modo RECORDING)
             if self.current_state == SystemState.RECORDING:
                 self.recording_buffer.append([
-                    q1, q2, q3,
-                    float(a1_valve), float(a2_pump)
+                    kin_array[0], kin_array[1], kin_array[2],
+                    float(is_actuator_on)
                 ])
 
             # Propagacion de telemetria hacia la UI (Observer Pattern)
@@ -225,9 +230,9 @@ class RobotController:
                 # Se asume que callback implementa mecanismos de Thread-Safe
                 self.ui_update_callback(
                     self.robot.get_cartesian_state(),
-                    [q1, q2, q3],
+                    kin_array.tolist(),
                     self.current_state,
-                    self.actuator_state
+                    self.actuator_active
                 )
             
         except ValueError as ve:
@@ -619,6 +624,45 @@ class RobotController:
         
         return self._dispatch_command("M113", "Cancel Trajectory")
     
+    # ==== CONTROL DE HERRAMIENTA ====
+    def toggle_actuator(self) -> bool:
+        """
+        Alterna el estado lógico del actuador principal.
+        
+        Retorno:
+            bool: True si el comando fue encolado, False en caso de error o bloqueo de seguridad.
+        """
+        # Condición de Guarda
+        estados_permitidos = [SystemState.IDLE, SystemState.MANUAL, SystemState.AUTO_READY]
+        if self.current_state not in estados_permitidos:
+            self.logger.warning(
+                "Accionamiento de herramienta denegado. "
+                f"El estado '{self.current_state.value}' no permite control manual."
+            )
+            return False
+
+        if not self.is_connected:
+            self.logger.warning("Comando denegado: El sistema está desconectado.")
+            return False
+
+        if self.actuator_active:
+            cmd = "M5"
+            action_desc = "Apagar Actuador (Soltar)"
+        else:
+            cmd = "M3"
+            action_desc = "Encender Actuador (Agarrar)"
+
+        self.logger.info(f"Solicitando {action_desc} (Comando {cmd})...")
+        
+        # Nota: Usamos uart.send_message directamente y no _dispatch_command() 
+        # porque M3/M5 no representan una transición de la Máquina de Estados
+        transmission_success = self.uart.send_message(cmd)
+        
+        if not transmission_success:
+            self.logger.error(f"Fallo de comunicación: Buffer TX lleno al intentar enviar {cmd}.")
+            return False
+
+        return True
 
     # ==== SIMULACION DE TRAYECTORIAS ====
     def simulate_trajectory(self) -> bool:
