@@ -605,8 +605,7 @@ class ControlPanel(QWidget):
         Llamado asíncronamente por el backend si el actuador cambia de estado
         por motivos externos (ej. Telemetría o Rutina automática).
         """
-        
-        if self._actuator_is_on != is_on:
+        if getattr(self, '_actuator_is_on', None) != is_on:
             self._actuator_is_on = is_on
             self._update_actuator_button_style()
 
@@ -652,12 +651,7 @@ class ControlPanel(QWidget):
 
     def _on_actuator_clicked(self) -> None:
         """Invierte el estado interno y emite la orden al backend."""
-        # Cambiamos el estado local de la UI de forma predictiva para mejor UX
-        self._actuator_is_on = not self._actuator_is_on
-        self._update_actuator_button_style()
-        
-        # Emitimos la orden al orquestador (True = Encender, False = Apagar)
-        self.request_toggle_actuator.emit(self._actuator_is_on)
+        self.request_toggle_actuator.emit()
 
 
 
