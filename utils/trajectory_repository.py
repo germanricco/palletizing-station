@@ -8,7 +8,7 @@ class TrajectoryRepository:
     Se encarga de la persistencia de datos matriciales (física).
     """
     # ==== INICIALIZACION
-    def __init__(self, storage_dir: str = "trajectories"):
+    def __init__(self, storage_dir: str = "trajectories", expected_columns: int = 6):
         """
         Inicializa el repositorio.
 
@@ -17,8 +17,7 @@ class TrajectoryRepository:
             expected_columns: Dimension D de la matriz (N, D)
         """
         self.storage_dir = storage_dir
-        self.expected_columns = self.expected_columns
-
+        self.expected_columns = expected_columns
         os.makedirs(self.storage_dir, exist_ok=True)
         self.logger = logging.getLogger("STM32_Controller.TrajectoryRepo")
 
