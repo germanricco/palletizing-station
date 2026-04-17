@@ -698,29 +698,6 @@ class RobotController:
 
         return True
 
-        if not self.is_connected:
-            self.logger.warning("Comando denegado: El sistema está desconectado.")
-            return False
-
-        if self.actuator_active:
-            cmd = "M5"
-            action_desc = "Apagar Actuador (Soltar)"
-        else:
-            cmd = "M3"
-            action_desc = "Encender Actuador (Agarrar)"
-
-        self.logger.info(f"Solicitando {action_desc} (Comando {cmd})...")
-        
-        # Nota: Usamos uart.send_message directamente y no _dispatch_command() 
-        # porque M3/M5 no representan una transición de la Máquina de Estados
-        transmission_success = self.uart.send_message(cmd)
-        
-        if not transmission_success:
-            self.logger.error(f"Fallo de comunicación: Buffer TX lleno al intentar enviar {cmd}.")
-            return False
-
-        return True
-
     
     # ==== SIMULACION DE TRAYECTORIAS ====
     def simulate_trajectory(self) -> bool:
