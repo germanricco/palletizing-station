@@ -281,24 +281,16 @@ bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCm
         return false;
     }
 
-    /*
-     * Verifica prefijo obligatorio "G1:"
-     */
+    // Validacion de prefijo "G1:"
     if ((rawLine[0] != 'G') || (rawLine[1] != '1') || (rawLine[2] != ':')) {
         return false;
     }
 
-    /*
-     * Copiamos el payload a un buffer modificable local.
-     * Ejemplo esperado:
-     *   "0.10,0.20,0.30"
-     */
+    // Buffer modificable local con payload. Ej: "0.10, 0.20, 0.30"
     char buffer[96] = {0};
     std::snprintf(buffer, sizeof(buffer), "%s", rawLine + 3);  // salta "G1:"
 
-    /*
-     * Separar exactamente 3 tokens por coma
-     */
+    // Separar 3 tokens
     char* tokens[3] = {nullptr};
     int tokenCount = 0;
 
@@ -310,43 +302,31 @@ bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCm
         token = strtok_r(nullptr, ",", &context);
     }
 
-    /*
-     * Deben venir exactamente 3 campos
-     */
+    // Validacion de cantidad de campos
     if (tokenCount != 3) {
         return false;
     }
 
-    /*
-     * No deben quedar campos extra
-     */
+    // Validacion de campos extras
     if (strtok_r(nullptr, ",", &context) != nullptr) {
         return false;
     }
 
     char* endPtr = nullptr;
 
-    /*
-     * q1
-     */
+    // Obtener q1, q2 y q3
     endPtr = nullptr;
     const float q1 = std::strtof(tokens[0], &endPtr);
     if ((endPtr == tokens[0]) || (*endPtr != '\0')) {
         return false;
     }
 
-    /*
-     * q2
-     */
     endPtr = nullptr;
     const float q2 = std::strtof(tokens[1], &endPtr);
     if ((endPtr == tokens[1]) || (*endPtr != '\0')) {
         return false;
     }
 
-    /*
-     * q3
-     */
     endPtr = nullptr;
     const float q3 = std::strtof(tokens[2], &endPtr);
     if ((endPtr == tokens[2]) || (*endPtr != '\0')) {
@@ -745,7 +725,7 @@ void Controller::processStateLocalCommand(const char* rawLine) {
  * ================================================================
  */
 void Controller::detenerActuadoresManuales(void) {
-    _servoBase.setVelocityCommand(0.0f);
+    _servoBase.commandVelocity(0.0f);
 }
 
 void Controller::realizarServoInitInicial(void) {
@@ -762,12 +742,11 @@ void Controller::enviarTelemetria(void) {
     const float j1_rad = _servoBase.getAngleRadians();
     const float j2_rad = 1.20f;   // TODO: integrar servo 2
     const float j3_rad = -2.00f;  // TODO: integrar servo 3
-    const int a1 = 0;             // TODO: integrar bomba de vacío
-    const int a2 = 0;             // TODO: integrar solenoide
+    const int a1 = 0;             // TODO: integrar actuador
 
     std::snprintf(msg, sizeof(msg),
-                  "T:%.2f,%.2f,%.2f,%d,%d\r\n",
-                  j1_rad, j2_rad, j3_rad, a1, a2);
+                  "T:%.2f,%.2f,%.2f,%d\r\n",
+                  j1_rad, j2_rad, j3_rad, a1);
 
     _terminal.enviarNormal(msg);
 }
@@ -876,7 +855,7 @@ void Controller::onUpdateIdle(void) {
 }
 
 void Controller::onUpdateManual(void) {
-    _servoBase.setVelocityCommand(_joystickIzquierdo.ObtenerX());
+    _servoBase.commandVelocity(_joystickIzquierdo.ObtenerX());
 
     if (_joystickIzquierdo.HayPulsacionValida()) {
         Logger::logINFO("MANUAL: pulsador izq accionado. Conmutando LED.");
@@ -885,7 +864,7 @@ void Controller::onUpdateManual(void) {
 }
 
 void Controller::onUpdateRecording(void) {
-    _servoBase.setVelocityCommand(_joystickIzquierdo.ObtenerX());
+    _servoBase.commandVelocity(_joystickIzquierdo.ObtenerX());
 }
 
 void Controller::onUpdateAutoReady(void) {
