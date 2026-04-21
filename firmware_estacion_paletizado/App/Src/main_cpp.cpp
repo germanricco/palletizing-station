@@ -3,6 +3,7 @@
 #include "Joystick.hpp"
 #include "Servo.hpp"
 #include "MotorDC.hpp"
+#include "Actuador.hpp"
 #include "TerminalSerial.hpp"
 #include "Logger.hpp"
 #include "StationController.hpp"
@@ -40,6 +41,9 @@ Servo servo_base(&TIM3->CCR1,
 // MotorDC
 MotorDC motor_cinta(&TIM2->CCR3, 49, 0);
 
+// Actuador
+Actuador efector_final(&TIM2->CCR1, &TIM2->CCR2, 49, 800);
+
 // Terminal
 TerminalSerial terminal(&huart1);
 
@@ -65,6 +69,11 @@ void Cpp_Main_Init(void) {
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
     HAL_TIM_Base_Start_IT(&htim3);
 
+    // Actuador
+    efector_final.init();
+    HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+
     // MotorDC
     motor_cinta.init();
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
@@ -86,6 +95,7 @@ void Cpp_Main_Loop(void) {
 
     const uint32_t tiempo_actual = HAL_GetTick();
 
+    // ===================================================================================
     /**
      * RUTINA DE PRUEBA: PERFIL DE VELOCIDAD MOTOR CINTA
      */
@@ -118,6 +128,45 @@ void Cpp_Main_Loop(void) {
 
     // Inyección de la velocidad calculada al motor
     motor_cinta.setSpeed(velocidad_prueba);
+
+    // ===================================================================================
+
+    /**
+     * RUTINA DE PRUEBA: Actuador (Efector Final)
+     */
+    static uint32_t tiempo_inicio_succion = 0;
+    const uint32_t DURACION_SUCCION_MS = 2000;
+
+    efector_final.update(tiempo_actual);
+
+    // 2. Transición automática: De Succión (100%) a Retención (10%) por tiempo
+    if (efector_final.getState() == ActuatorState::Suction) {
+    	if ((tiempo_actual - tiempo_inicio_succion) >= DURACION_SUCCION_MS) {
+    		efector_final.commandHold(0.2f); // Baja la potencia PWM de la bomba al 10%
+            Logger::logINFO("ACTUADOR: Vacio asegurado. Pasando a Holding (10% PWM).");
+        }
+    }
+
+    if (joystick_izquierdo.HayPulsacionValida()) {
+    	Logger::logINFO("MANUAL: Pulsador izq accionado.");
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1); // Feedback visual
+
+        ActuatorState estado_actual = efector_final.getState();
+
+        // Evaluar estado para decidir la acción contraria
+        if (estado_actual == ActuatorState::Idle || estado_actual == ActuatorState::Releasing) {
+        	// Si estaba apagado, encender al máximo
+            efector_final.commandSuction(1.0f);
+            tiempo_inicio_succion = tiempo_actual; // Registrar inicio para el timeout
+            Logger::logINFO("ACTUADOR: Iniciando Succion (100% PWM).");
+        }
+        else if (estado_actual == ActuatorState::Suction || estado_actual == ActuatorState::Holding) {
+            // Si estaba agarrando la pieza, soltarla
+            efector_final.commandRelease();
+            Logger::logINFO("ACTUADOR: Liberando pieza (Apertura de Valvula).");
+        }
+    }
+
     // ===================================================================================
 
     stationController.update(tiempo_actual);

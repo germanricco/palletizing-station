@@ -654,14 +654,3 @@ class ControlPanel(QWidget):
         self.request_toggle_actuator.emit()
 
 
-
-
-
-
-
-
-
-
-
-
-
