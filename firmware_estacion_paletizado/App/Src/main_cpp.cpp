@@ -7,6 +7,7 @@
 #include "TerminalSerial.hpp"
 #include "Logger.hpp"
 #include "StationController.hpp"
+#include "SensorIR.hpp"
 
 #include "stm32f1xx_hal.h"
 #include <cstdio>
@@ -40,6 +41,9 @@ Servo servo_base(&TIM3->CCR1,
 
 // MotorDC
 MotorDC motor_cinta(&TIM2->CCR3, 49, 0);
+
+//SensorIR//IMPORTANTE: suponemos que el IR da un nivel LOW cuando detecta por eso RESET
+SensorIR sensor_fin_cinta(GPIOB,GPIO_PIN_12,GPIO_PIN_RESET,30);
 
 // Actuador
 Actuador efector_final(&TIM2->CCR1, &TIM2->CCR2, 49, 800);
@@ -78,6 +82,9 @@ void Cpp_Main_Init(void) {
     motor_cinta.init();
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
 
+    // Sensor IR de fin de cinta
+    sensor_fin_cinta.init(HAL_GetTick());
+
     // Controlador
     stationController.init();
 
@@ -94,6 +101,20 @@ void Cpp_Main_Loop(void) {
     terminal.update();
 
     const uint32_t tiempo_actual = HAL_GetTick();
+
+    bool cambio_sensor_fin_cinta = sensor_fin_cinta.update(tiempo_actual);
+
+    if (cambio_sensor_fin_cinta)
+    {
+        if (sensor_fin_cinta.objetoDetectado())
+        {
+            Logger::logINFO("SENSOR IR: Objeto detectado al final de la cinta.");
+        }
+        else
+        {
+            Logger::logINFO("SENSOR IR: Fin de cinta libre.");
+        }
+    }
 
     // ===================================================================================
     /**
@@ -127,7 +148,16 @@ void Cpp_Main_Loop(void) {
     }
 
     // Inyección de la velocidad calculada al motor
-    motor_cinta.setSpeed(velocidad_prueba);
+    //motor_cinta.setSpeed(velocidad_prueba);
+    float velocidad_motor_cinta = velocidad_prueba;
+
+    if (sensor_fin_cinta.objetoDetectado())
+    {
+        velocidad_motor_cinta = 0.0f;
+    }
+
+    motor_cinta.setSpeed(velocidad_motor_cinta);
+
 
     // ===================================================================================
 
@@ -192,9 +222,16 @@ extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 }
 
 // Interrupcion externa (evento de pulsador)
-extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-    if (GPIO_Pin == GPIO_PIN_5) {
+extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == GPIO_PIN_5)
+    {
         joystick_izquierdo.NotificarInterrupcion(GPIO_Pin);
+    }
+
+    if (sensor_fin_cinta.pinCoincide(GPIO_Pin))
+    {
+        sensor_fin_cinta.notificarInterrupcion(GPIO_Pin);
     }
 }
 
