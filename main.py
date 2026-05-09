@@ -54,7 +54,7 @@ def main():
     # 3. Instanciar el Controlador de Hardware
     TARGET_PORT = "/dev/ttyUSB0" #"/dev/ttyUSB0"  # Adaptar según el SO (ej. COM3 en Windows)
     BAUD_RATE = 115200
-    CHUNK_SIZE = 15
+    CHUNK_SIZE = 32
     LOG_LEVEL = logging.INFO
     robot_controller = RobotController(port=TARGET_PORT, baudrate=BAUD_RATE, chunk_size=CHUNK_SIZE, log_level=LOG_LEVEL)
 
