@@ -29,7 +29,7 @@ class RobotController:
     Controlador Maestro del sistema robotico.
     """
     # ==== INICIALIZACION Y CICLO DE VIDA ====
-    def __init__(self, port: str, baudrate: int = 115200, chunk_size: int = 15, log_level: int = logging.INFO):
+    def __init__(self, port: str, baudrate: int = 115200, chunk_size: int = 32, log_level: int = logging.INFO):
         """
         Instancia y ensambla todos los subsistemas del controlador
 
@@ -171,10 +171,12 @@ class RobotController:
 
                 # Streamer tambien requiere enterarse de confirmacion ACK_M112
                 if raw_message == "ACK_M112":
+                    print("ACK_M112 Recibido desde STM32")
                     self.streamer.process_message(raw_message)
 
             # Interaccion con el Streamer 
             elif raw_message == "REQ_CHUNK":
+                print("REQ_CHUNK Recibido desde STM32")
                 # Si el mensaje pertenece al protocolo de streaming, lo delegamos al TrajectoryStreamer
                 self.streamer.process_message(raw_message)
 
@@ -188,7 +190,7 @@ class RobotController:
     def _handle_telemetry(self, data_str: str) -> None:
         """
         Procesa la trama de telemetria asincrona a 50Hz.
-        Formato de entrada esperado (data_str): "J1,J2,J3,A1,A1"
+        Formato de entrada esperado (data_str): "J1,J2,J3,A1"
         """
         try:
             # Extraccion y Validacion Estructural
@@ -209,7 +211,8 @@ class RobotController:
             
             # Crea vector de estado articular
             servos_array = np.array([s1, s2, s3], dtype=np.float32)
-            # Convierte a valores cinematicos
+
+            # Convierte a valores articulares en radianes a cinematicos
             kin_array = self.robot.servo_to_kinematic(servos_array)
 
             # Actualizar estado del Digital Twin
@@ -600,29 +603,26 @@ class RobotController:
         self.logger.debug("Delegando envio de trayectoria al TrajectoryStreamer.")
         
         # Copia de seguridad para evitar modificaciones de memoria cache
+        # Nx4
         hardware_trajectory = np.copy(self.active_trajectory)
 
         try:
-            # Iterar y transformar columnas de posicion (q1, q2, q3)
-            for i in range(hardware_trajectory.shape[0]):
-                q1_kin = hardware_trajectory[i, 0]
-                q2_kin = hardware_trajectory[i, 1]
-                q3_kin = hardware_trajectory[i, 2]
+            # Extraer todas las filas y las primeras tres columnas
+            # Separa posiciones articulares (q1, q2, q3) del estado del actuador
+            q_kin_matrix = hardware_trajectory[:, :3]
                 
-                # Invocamos la transformación inversa (Ajusta el nombre del método según tu clase)
-                s1, s2, s3 = self.robot.kinematic_to_servo(q1_kin, q2_kin, q3_kin)
+            # Invocamos la transformación inversa (Ajusta el nombre del método según tu clase)
+            q_servo_matrix = self.robot.map_kinematic_trajectory_to_servos(q_kin_matrix)
                 
-                # Sobreescribimos con los valores crudos para el STM32
-                hardware_trajectory[i, 0] = s1
-                hardware_trajectory[i, 1] = s2
-                hardware_trajectory[i, 2] = s3
+            # Reinyectamos los valores  traducidos en la matriz de hardware
+            # Sigue siendo Nx4
+            hardware_trajectory[:, :3] = q_servo_matrix
 
         except Exception as e:
             self.logger.error(f"Fallo critico en la transformacion cinematica: {e}")
             return False
 
         self.logger.debug("Delegando envio de trayectoria al TrajectoryStreamer.")
-
         self.streamer.start_streaming(hardware_trajectory)
         return True
 

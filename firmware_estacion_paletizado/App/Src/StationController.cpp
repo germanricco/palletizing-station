@@ -53,17 +53,16 @@ namespace Station {
  * ================================================================
  */
 
-/*
- * ================================================================
- * CONSTRUCTOR
- * ================================================================
- */
+
+// CONSTRUCTOR
 Controller::Controller(TerminalSerial& terminal,
                        Joystick& joystickIzquierdo,
-                       Servo& servoBase)
+                       Servo& servoBase,
+					   Actuador& efectorFinal)
     : _terminal(terminal),
       _joystickIzquierdo(joystickIzquierdo),
       _servoBase(servoBase),
+	  _efectorFinal(efectorFinal),
       _state(GlobalState::Boot),
       _previousState(GlobalState::Boot),
       _stateChanged(false),
@@ -71,6 +70,7 @@ Controller::Controller(TerminalSerial& terminal,
       _primerIngresoIdle(true),
       _stateEntryTick(0U),
       _tiempoUltimoEnvioTelemetria(0U),
+	  _tiempoInicioSuccion(0U),
       _autoFifo{},
       _autoFifoHead(0U),
       _autoFifoTail(0U),
@@ -81,11 +81,8 @@ Controller::Controller(TerminalSerial& terminal,
 	  _waitingFirstChunkAfterStart(false){
 }
 
-/*
- * ================================================================
- * INICIALIZACIÓN GENERAL
- * ================================================================
- */
+
+// INICIALIZACION
 void Controller::init(void) {
     _state = GlobalState::Boot;
     _previousState = GlobalState::Boot;
@@ -105,10 +102,20 @@ void Controller::init(void) {
  * ================================================================
  */
 void Controller::update(uint32_t nowMs) {
-    if (!_initialized) {
-        init();
+    if (!_initialized) init();
+
+    // Actualizar la Maquina de estados interna del actuador neumatico
+    _efectorFinal.update(nowMs);
+
+    // Transicion de succion (100%) a retencion (10%)
+    if (_efectorFinal.getState() == ActuatorState::Suction) {
+    	if ((nowMs - _tiempoInicioSuccion) >= 2000U ) {
+    		_efectorFinal.commandHold(0.1f);
+    		Logger::logINFO("Actuador: Vacio asegurado. Pasando a Holding");
+    	}
     }
 
+    // Lecutra de Comandos UART
     if (_terminal.hayComandoPendiente()) {
         const char* comando = _terminal.obtenerComandoPendiente();
 
@@ -134,8 +141,10 @@ void Controller::update(uint32_t nowMs) {
             break;
     }
 
+    // Ejecutar acciones propias de cada estado
     runCurrentState();
 
+    // Envio de Telemetria
     if ((nowMs - _tiempoUltimoEnvioTelemetria) >= 20U) {
         _tiempoUltimoEnvioTelemetria = nowMs;
         enviarTelemetria();
@@ -170,6 +179,7 @@ bool Controller::didStateChange(void) const {
 void Controller::clearStateChangeFlag(void) {
     _stateChanged = false;
 }
+
 
 /*
  * ================================================================
@@ -286,57 +296,37 @@ bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCm
         return false;
     }
 
-    // Buffer modificable local con payload. Ej: "0.10, 0.20, 0.30"
+    // Buffer modificable local con payload
     char buffer[96] = {0};
     std::snprintf(buffer, sizeof(buffer), "%s", rawLine + 3);  // salta "G1:"
 
-    // Separar 3 tokens
-    char* tokens[3] = {nullptr};
+    // Separar 4 tokens
+    char* tokens[4] = {nullptr};
     int tokenCount = 0;
-
     char* context = nullptr;
     char* token = strtok_r(buffer, ",", &context);
 
-    while ((token != nullptr) && (tokenCount < 3)) {
+    while ((token != nullptr) && (tokenCount < 4)) {
         tokens[tokenCount++] = token;
         token = strtok_r(nullptr, ",", &context);
     }
 
     // Validacion de cantidad de campos
-    if (tokenCount != 3) {
-        return false;
-    }
-
-    // Validacion de campos extras
-    if (strtok_r(nullptr, ",", &context) != nullptr) {
+    if (tokenCount != 4) {
         return false;
     }
 
     char* endPtr = nullptr;
-
-    // Obtener q1, q2 y q3
-    endPtr = nullptr;
     const float q1 = std::strtof(tokens[0], &endPtr);
-    if ((endPtr == tokens[0]) || (*endPtr != '\0')) {
-        return false;
-    }
-
-    endPtr = nullptr;
     const float q2 = std::strtof(tokens[1], &endPtr);
-    if ((endPtr == tokens[1]) || (*endPtr != '\0')) {
-        return false;
-    }
-
-    endPtr = nullptr;
     const float q3 = std::strtof(tokens[2], &endPtr);
-    if ((endPtr == tokens[2]) || (*endPtr != '\0')) {
-        return false;
-    }
+    const uint8_t a1 = static_cast<uint8_t>(std::strtol(tokens[3], &endPtr, 10)); // Actuador
 
     outCmd.valid = true;
     outCmd.q1 = q1;
     outCmd.q2 = q2;
     outCmd.q3 = q3;
+    outCmd.a1 = a1;
 
     return true;
 }
@@ -402,14 +392,6 @@ void Controller::startNextAutoPointIfNeeded(void) {
 
     _activeAutoPoint = nextPoint;
     _hasActiveAutoPoint = true;
-
-    Logger::logINFO(
-        "AUTO_RUNNING: nuevo punto activo q1=%.3f q2=%.3f q3=%.3f| fifo_restante=%u",
-        _activeAutoPoint.q1,
-        _activeAutoPoint.q2,
-        _activeAutoPoint.q3,
-        static_cast<unsigned>(_autoFifoCount)
-    );
 }
 
 void Controller::processActiveAutoPoint(void) {
@@ -417,42 +399,54 @@ void Controller::processActiveAutoPoint(void) {
         return;
     }
 
-    /*
-     * PRIMERA ETAPA:
-     * consumo lógico inmediato para validar el protocolo de streaming.
-     * Más adelante acá se conectará _activeAutoPoint.q1 al servo real.
-     */
-    Logger::logINFO(
-        "AUTO_RUNNING: punto consumido q1=%.3f q2=%.3f q3=%.3f ",
-        _activeAutoPoint.q1,
-        _activeAutoPoint.q2,
-        _activeAutoPoint.q3
-    );
+    // Usamos variables estaticas para mantener seguimiento del tiempo entre ciclos
+    static bool comandoInyectado = false;
+    static uint32_t tiempo_ultimo_punto = 0;
+    uint32_t nowMs = HAL_GetTick();
 
-    _hasActiveAutoPoint = false;
+    // Si es un punto nuevo, lo inyectamos al hardware
+    if(!comandoInyectado) {
+    	float anguloGradosQ1 = _activeAutoPoint.q1 * 57.29578f;
+
+    	_servoBase.commandDirectPosition(anguloGradosQ1);
+    	// _servoHombro.commandDirectPosition(_activeAutoPoint.q2;
+
+    	// EJECUCIÓN SINCRONIZADA DEL ACTUADOR
+    	if (_activeAutoPoint.a1 == 1) {
+    		// Si la bomba no estaba prendida, la prendemos
+    		if (_efectorFinal.getState() != ActuatorState::Suction &&
+    				_efectorFinal.getState() != ActuatorState::Holding) {
+    	            _efectorFinal.commandSuction(1.0f);
+    		}
+    	} else {
+    		// Si estaba prendida, la apagamos/purgamos
+    		if (_efectorFinal.getState() != ActuatorState::Idle &&
+    				_efectorFinal.getState() != ActuatorState::Releasing) {
+    			_efectorFinal.commandRelease();
+    		}
+    	}
+
+    	comandoInyectado = true;
+    	tiempo_ultimo_punto = nowMs;	// Marcamos el inicio del reloj para este waypoint
+    }
+
+    // Temporizador estricto de trayectoria a 20ms (50Hz)
+    if ((nowMs - tiempo_ultimo_punto) >= 20) {
+    	_hasActiveAutoPoint = false;
+    	comandoInyectado = false;
+    }
 }
 
 void Controller::requestNextChunkIfNeeded(void) {
+	// Pedir el siguiente cuando este a la mitad (queue de 32)
+    if (_autoFifoCount > (AUTO_FIFO_CAPACITY / 2)) return;
 
-	if (_waitingFirstChunkAfterStart) {
-	        return;
-	}
-    if (_hasActiveAutoPoint) {
-        return;
-    }
-
-    if (!isAutoFifoEmpty()) {
-        return;
-    }
-
-    if (_chunkRequestPending) {
-        return;
-    }
+    if (_chunkRequestPending) return;
 
     _terminal.enviarNormal("REQ_CHUNK\r\n");
     _chunkRequestPending = true;
 
-    Logger::logINFO("AUTO_RUNNING: FIFO vacia. Enviado REQ_CHUNK.");
+    Logger::logINFO("AUTO_RUNNING: FIFO en umbral bajo. Enviado REQ_CHUNK.");
 }
 
 /*
@@ -737,17 +731,27 @@ void Controller::realizarGoHomeNormal(void) {
 }
 
 void Controller::enviarTelemetria(void) {
+	// Buffer de mensaje
     char msg[96];
 
+    // Estado de Servos
     const float j1_rad = _servoBase.getAngleRadians();
     const float j2_rad = 1.20f;   // TODO: integrar servo 2
     const float j3_rad = -2.00f;  // TODO: integrar servo 3
-    const int a1 = 0;             // TODO: integrar actuador
 
+    // Estado de Actuador
+    int a1 = 0;
+    ActuatorState estadoActuador = _efectorFinal.getState();
+    if (estadoActuador == ActuatorState::Suction || estadoActuador == ActuatorState::Holding) {
+    	a1 = 1;
+    }
+
+    // Armar el mensaje
     std::snprintf(msg, sizeof(msg),
                   "T:%.2f,%.2f,%.2f,%d\r\n",
                   j1_rad, j2_rad, j3_rad, a1);
 
+    // Enviarlo
     _terminal.enviarNormal(msg);
 }
 
@@ -760,6 +764,29 @@ void Controller::enviarEstadoActualPorUart(void) {
                   stateToString(getPreviousState()));
 
     _terminal.enviarNormal(msg);
+}
+
+
+void Controller::procesarTeleoperacion(void) {
+    // 1. Actualizar Motores pasando comando de velocidad
+    _servoBase.commandVelocity(_joystickIzquierdo.ObtenerX());
+
+    // 2. Actualizar Actuador si hay pulsación
+    if (_joystickIzquierdo.HayPulsacionValida()) {
+        Logger::logINFO("TELEOPERACION: pulsador izq accionado. Conmutando LED y Actuador.");
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1); // Feedback visual
+
+        ActuatorState estadoActuador = _efectorFinal.getState();
+
+        if (estadoActuador == ActuatorState::Idle || estadoActuador == ActuatorState::Releasing) {
+            _efectorFinal.commandSuction(1.0f);
+            _tiempoInicioSuccion = HAL_GetTick(); // Registramos el inicio
+            Logger::logINFO("ACTUADOR: Iniciando Succion (100% PWM).");
+        } else {
+            _efectorFinal.commandRelease();
+            Logger::logINFO("ACTUADOR: Liberando pieza.");
+        }
+    }
 }
 
 /*
@@ -807,7 +834,6 @@ void Controller::onEnterAutoReady(void) {
 
 void Controller::onEnterAutoRunning(void) {
     Logger::logINFO("FSM -> AutoRunning");
-    detenerActuadoresManuales();
 
     /*
      * Al iniciar playback desde AutoReady queremos arrancar limpio.
@@ -815,8 +841,10 @@ void Controller::onEnterAutoRunning(void) {
      */
     if (_previousState != GlobalState::AutoPaused) {
         clearAutoRuntimeState();
-        _waitingFirstChunkAfterStart = true;
-        Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Esperando puntos G...");
+        // Iniciamos asumiendo que ya recibimos el primer chunk
+        _chunkRequestPending = true;
+
+        Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Esperando 1er Chunk...");
     } else {
         Logger::logINFO("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
     }
@@ -837,7 +865,13 @@ void Controller::onEnterFault(void) {
 void Controller::onEnterEmergency(void) {
     Logger::logERROR("FSM -> Emergency");
     detenerActuadoresManuales();
+
+    // Cortar energia a actuador final
+    _efectorFinal.commandIdle();
+
     clearAutoRuntimeState();
+
+	// Enviar evento externo
     _terminal.enviarNormal("EVT:EMERGENCY\r\n");
 }
 
@@ -846,50 +880,31 @@ void Controller::onEnterEmergency(void) {
  * CALLBACKS DE UPDATE POR ESTADO
  * ================================================================
  */
-void Controller::onUpdateInit(void) {
-    detenerActuadoresManuales();
-}
+void Controller::onUpdateInit(void) {}
 
-void Controller::onUpdateIdle(void) {
-    detenerActuadoresManuales();
-}
+void Controller::onUpdateIdle(void) {}
 
 void Controller::onUpdateManual(void) {
-    _servoBase.commandVelocity(_joystickIzquierdo.ObtenerX());
-
-    if (_joystickIzquierdo.HayPulsacionValida()) {
-        Logger::logINFO("MANUAL: pulsador izq accionado. Conmutando LED.");
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1);
-    }
+	procesarTeleoperacion();
 }
 
 void Controller::onUpdateRecording(void) {
-    _servoBase.commandVelocity(_joystickIzquierdo.ObtenerX());
+	procesarTeleoperacion();
 }
 
-void Controller::onUpdateAutoReady(void) {
-    detenerActuadoresManuales();
-}
+void Controller::onUpdateAutoReady(void) {}
 
 void Controller::onUpdateAutoRunning(void) {
-    detenerActuadoresManuales();
-
-    startNextAutoPointIfNeeded();
+	startNextAutoPointIfNeeded();
     processActiveAutoPoint();
     requestNextChunkIfNeeded();
 }
 
-void Controller::onUpdateAutoPaused(void) {
-    detenerActuadoresManuales();
-}
+void Controller::onUpdateAutoPaused(void) {}
 
-void Controller::onUpdateFault(void) {
-    detenerActuadoresManuales();
-}
+void Controller::onUpdateFault(void) {}
 
-void Controller::onUpdateEmergency(void) {
-    detenerActuadoresManuales();
-}
+void Controller::onUpdateEmergency(void) {}
 
 /*
  * ================================================================
@@ -920,12 +935,9 @@ void Controller::onAutoReadyCommand(const char* rawCommand) {
 }
 
 void Controller::onAutoRunningCommand(const char* rawCommand) {
-    Logger::logINFO("CMD(AUTO_RUNNING): %s", rawCommand);
-
     PendingAutoCommand parsedCmd{};
 
     if (!tryParseGCommand(rawCommand, parsedCmd)) {
-        Logger::logINFO("AUTO_RUNNING: comando local ignorado o formato G invalido.");
         return;
     }
 
@@ -933,19 +945,13 @@ void Controller::onAutoRunningCommand(const char* rawCommand) {
         Logger::logERROR("AUTO_RUNNING: FIFO llena. Punto descartado.");
         return;
     }
-    // Ya llego el primer chunk o parte de el.
-    _waitingFirstChunkAfterStart = false;
 
     // Al llegar datos nuevos dejamos de considerar pendiente el pedido anterior.
-    _chunkRequestPending = false;
-
-    Logger::logINFO(
-        "AUTO_RUNNING: punto encolado q1=%.3f q2=%.3f q3=%.3f | fifo_count=%u",
-        parsedCmd.q1,
-        parsedCmd.q2,
-        parsedCmd.q3,
-        static_cast<unsigned>(_autoFifoCount)
-    );
+    // SOLO liberar la bandera de petición si la cola de memoria ya se recuperó.
+    // Esto evita enviar multiples REQ_CHUNK mientras se recibe el paquete.
+    if (_chunkRequestPending && (_autoFifoCount > (AUTO_FIFO_CAPACITY / 2))) {
+    	_chunkRequestPending = false;
+    }
 }
 
 void Controller::onAutoPausedCommand(const char* rawCommand) {

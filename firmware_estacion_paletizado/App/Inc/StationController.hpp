@@ -1,147 +1,150 @@
+/**
+ * @file StationController.hpp
+ * @brief Controlador central y Máquina de Estados (FSM) de la Estación de Paletizado.
+ * @details Este módulo concentra la lógica principal de la estación:
+ *          - Interpretación de comandos UART.
+ *          - Máquina de Estados Finitos (FSM).
+ *          - Ejecución de trayectorias (Streaming) y telemetría.
+ *          - Respuestas ACK/ERR del protocolo.
+ *
+ * @note CRITERIO DE ARRANQUE Y TRANSICIONES SEGURAS:
+ *       - Boot -> Init ocurre automáticamente.
+ *       - Init queda como estado seguro de espera (Home inicial no forzado).
+ *       - M99: Pasa de Init a Idle.
+ *       - M98: Permite retorno seguro a Init desde Idle, Manual o AutoReady.
+ */
+
 #ifndef STATION_CONTROLLER_HPP
 #define STATION_CONTROLLER_HPP
 
 #include "Joystick.hpp"
 #include "Servo.hpp"
+#include "Actuador.hpp"
 #include "TerminalSerial.hpp"
 #include <cstdint>
 
-/*
- * ================================================================
- * STATION CONTROLLER
- * ================================================================
- *
- * Este módulo concentra la lógica principal de la estación:
- * - interpretación de comandos UART
- * - máquina de estados finitos (FSM)
- * - acciones al entrar a cada estado
- * - acciones periódicas por estado
- * - telemetría
- * - respuestas ACK / ERR del protocolo
- *
- * NUEVO CRITERIO DE ARRANQUE:
- * - Boot -> Init ocurre automáticamente
- * - Init ya NO pasa automáticamente a Idle
- * - Init queda como estado seguro de espera
- * - M99 permite pasar de Init a Idle
- * - M98 permite volver a Init desde:
- *      * Idle
- *      * Manual
- *      * AutoReady
- * ================================================================
- */
+
 
 namespace Station {
 
-/*
- * ------------------------------------------------
- * Estados globales de la estación
- * ------------------------------------------------
+/**
+ * @enum GlobalState
+ * @brief Estados operativos de la Máquina de Estados Finita (FSM).
  */
 enum class GlobalState {
-    Boot,
-    Init,
-    Idle,
-    Manual,
-    Recording,
-    AutoReady,
-    AutoRunning,
-    AutoPaused,
-    Fault,
-    Emergency
+    Boot,			/**< Arranque del sistema y configuración de periféricos. */
+    Init,			/**< Estado seguro de espera inicial. Actuadores bloqueados. */
+    Idle,			/**< Estación en reposo, lista para recibir comandos operativos. */
+    Manual,			/**< Control directo teleoperado por el usuario mediante Joystick. */
+    Recording,		/**< Modo de enseñanza (Teach-in). Guarda puntos de trayectoria. */
+    AutoReady,		/**< Preparado para recibir y ejecutar trayectoria G-Code. */
+    AutoRunning,	/**< Ejecución activa de trayectoria en tiempo real (Streaming). */
+    AutoPaused,		/**< Pausa de trayectoria. Mantiene posición sin vaciar la FIFO. */
+    Fault,			/**< Falla recuperable del sistema. */
+    Emergency		/**< Parada de emergencia (E-Stop). Requiere reinicio físico. */
 };
 
-/*
- * ------------------------------------------------
- * Comandos reconocidos por UART
- * ------------------------------------------------
+
+/**
+ * @enum UartCommand
+ * @brief Comandos de control estructurados reconocidos por el protocolo UART.
  */
 enum class UartCommand {
     None,
     Unknown,
 
-    M98_GoInit,
-    M99_GoIdle,
-    M100_ManualMode,
-    M101_AutoMode,
-    M110_StartRecording,
-    M111_StopRecording,
-    M112_StartPlayback,
-    M113_StopPausePlayback,
-    M114_ResumePlayback,
-    M00_EStop,
+    M98_GoInit,				/**< Retorno forzado al estado seguro (Init). */
+    M99_GoIdle,				/**< Transición al estado de reposo operativo (Idle). */
+    M100_ManualMode,		/**< Habilita el control por joystick. */
+    M101_AutoMode,			/**< Prepara el buffer para ejecución automática. */
+    M110_StartRecording,	/**< Inicia el streaming de telemetría para guardado. */
+    M111_StopRecording,		/**< Finaliza el guardado y retorna a Manual. */
+    M112_StartPlayback,		/**< Inicia el consumo de la FIFO de trayectoria. */
+    M113_StopPausePlayback,	/**< Pausa la ejecución de la trayectoria. */
+    M114_ResumePlayback,	/**< Reanuda la trayectoria pausada. */
+    M00_EStop,				/**< Parada de emergencia. Corta potencia inmediatamente. */
 
-    Status
+    Status					/**< Solicita el estado actual de la FSM. */
 };
 
-/*
- * ------------------------------------------------
- * Resultado del procesamiento de un comando
- * ------------------------------------------------
- *
- * handled  -> indica si la FSM procesó el comando
- * success  -> indica si el resultado fue exitoso
- * response -> mensaje de respuesta a enviar
+/**
+ * @struct CommandResult
+ * @brief Empaqueta el resultado del procesamiento de un comando UART.
  */
 struct CommandResult {
-    bool handled;
-    bool success;
-    char response[48];
+    bool handled;			/**< True si la FSM procesó el comando (incluso si falló). */
+    bool success;			/**< True si la transición o acción fue exitosa. */
+    char response[48];		/**< Buffer con el mensaje ACK/ERR a transmitir. */
 };
 
-/*
- * ------------------------------------------------
- * Comando / punto automático parseado desde G:q1,q2,q3,a1,a2
- * ------------------------------------------------
+/**
+ * @struct PendingAutoCommand
+ * @brief Estructura de Waypoint (Punto de trayectoria) parseado desde G-Code.
  */
 struct PendingAutoCommand {
-    bool valid;
-    float q1;
-    float q2;
-    float q3;
+    bool valid;				/**< Bandera de integridad estructural del comando. */
+    float q1;				/**< Consigna articular 1 (Base). */
+    float q2;				/**< Consigna articular 2 (Hombro). */
+    float q3;				/**< Consigna articular 3 (Codo). */
+    uint8_t a1;				/**< Estado del actuador. */
 };
 
-/*
- * ------------------------------------------------
- * Clase principal del controlador de estación
- * ------------------------------------------------
+
+/**
+ * @class Controller
+ * @brief Director de orquesta del sistema. Gestiona dependencias, FSM y comunicaciones.
  */
 class Controller {
 public:
+	/**
+	 * @brief Constructor mediante Inyección de Dependencias.
+	 * @param terminal Enlace de comunicación UART.
+	 * @param joystickIzquierdo Periférico de entrada analógica.
+	 * @param servoBase Actuador principal del primer grado de libertad.
+	 * @param efectorFinal Controlador del circuito neumático (Bomba y Válvula).
+	 */
     Controller(TerminalSerial& terminal,
                Joystick& joystickIzquierdo,
-               Servo& servoBase);
+               Servo& servoBase,
+			   Actuador& efectorFinal);
 
+    /**
+     * @brief Inicializa el estado del controlador y prepara la FSM.
+     */
     void init(void);
+
+    /**
+     * @brief Bucle principal de resolución de la máquina de estados y tareas asíncronas.
+     * @param nowMs Marca de tiempo del sistema (HAL_GetTick).
+     */
     void update(uint32_t nowMs);
 
+    // --- Getters de Estado ---
     GlobalState getState(void) const;
     GlobalState getPreviousState(void) const;
     const char* getStateName(void) const;
-
     static const char* stateToString(GlobalState state);
 
+    // --- Gestión de Banderas de Transición ---
     bool didStateChange(void) const;
     void clearStateChangeFlag(void);
 
+    // --- Forzado de Estados Críticos ---
     void forceFault(uint32_t nowMs);
     void forceEmergency(uint32_t nowMs);
 
 private:
-    /*
-     * ------------------------------------------------
-     * Referencias a recursos externos
-     * ------------------------------------------------
-     */
+    /* ====================================================================
+     * DEPENDENCIAS FÍSICAS (Inyectadas)
+     * ==================================================================== */
     TerminalSerial& _terminal;
     Joystick& _joystickIzquierdo;
     Servo& _servoBase;
+    Actuador& _efectorFinal;
 
-    /*
-     * ------------------------------------------------
-     * Estado interno
-     * ------------------------------------------------
-     */
+    /* ====================================================================
+     * ESTADO INTERNO DEL CONTROLADOR
+     * ==================================================================== */
     GlobalState _state;
     GlobalState _previousState;
 
@@ -151,14 +154,14 @@ private:
 
     uint32_t _stateEntryTick;
     uint32_t _tiempoUltimoEnvioTelemetria;
+    uint32_t _tiempoInicioSuccion;			/**< Control del timeout de sujeción neumática. */
 
-    /*
-     * ------------------------------------------------
-     * NUEVO: FIFO de puntos para AUTO_RUNNING
-     * ------------------------------------------------
-     */
-    static constexpr uint8_t AUTO_FIFO_CAPACITY = 16U;
+    /* ====================================================================
+     * MEMORIA DINÁMICA: BUFFER CIRCULAR PARA TRAYECTORIAS (AUTO)
+     * ==================================================================== */
+    static constexpr uint8_t AUTO_FIFO_CAPACITY = 64U;
     PendingAutoCommand _autoFifo[AUTO_FIFO_CAPACITY];
+
     uint8_t _autoFifoHead;
     uint8_t _autoFifoTail;
     uint8_t _autoFifoCount;
@@ -166,21 +169,14 @@ private:
     PendingAutoCommand _activeAutoPoint;
     bool _hasActiveAutoPoint;
     bool _chunkRequestPending;
-
-    // NUEVO:
-    // true cuando se acaba de entrar a AUTO_RUNNING desde AUTO_READY
-    // y todavia no llego el primer chunk enviado por Python tras ACK_M112.
     bool _waitingFirstChunkAfterStart;
 
-private:
-    /*
-     * ================================================================
-     * UTILIDADES GENERALES
-     * ================================================================
-     */
+
+    /* ====================================================================
+     * MÉTODOS PRIVADOS: PARSEO Y UTILIDADES
+     * ==================================================================== */
     static const char* toString(GlobalState state);
     static const char* toString(UartCommand command);
-
     static void normalizeToUpperNoSpaces(const char* src, char* dst, uint16_t dstSize);
     static UartCommand parseUartCommand(const char* text);
 
@@ -189,18 +185,11 @@ private:
     CommandResult makeHandledNoReply(void);
     CommandResult makeNotHandled(void);
 
-    /*
-     * ================================================================
-     * Parser local para G1:q1,q2,q3
-     * ================================================================
-     */
     bool tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd);
 
-    /*
-     * ================================================================
-     * Helpers FIFO para AUTO_RUNNING
-     * ================================================================
-     */
+    /* ====================================================================
+     * MÉTODOS PRIVADOS: GESTIÓN DE COLA FIFO (STREAMING)
+     * ==================================================================== */
     bool enqueueAutoPoint(const PendingAutoCommand& cmd);
     bool dequeueAutoPoint(PendingAutoCommand& cmd);
     bool isAutoFifoEmpty(void) const;
@@ -211,33 +200,28 @@ private:
     void processActiveAutoPoint(void);
     void requestNextChunkIfNeeded(void);
 
-    /*
-     * ================================================================
-     * FSM
-     * ================================================================
-     */
+    /* ====================================================================
+     * MÉTODOS PRIVADOS: MOTOR DE MÁQUINA DE ESTADOS (FSM)
+     * ==================================================================== */
     void transitionTo(GlobalState newState, uint32_t nowMs);
     void onEnterState(GlobalState state);
     void runCurrentState(void);
     CommandResult handleUartLine(const char* rawLine, uint32_t nowMs);
     void processStateLocalCommand(const char* rawLine);
 
-    /*
-     * ================================================================
-     * AYUDAS DE LA ESTACIÓN
-     * ================================================================
-     */
+    /* ====================================================================
+     * MÉTODOS PRIVADOS: RUTINAS DE ACCIÓN ESPECÍFICA
+     * ==================================================================== */
     void detenerActuadoresManuales(void);
     void realizarServoInitInicial(void);
     void realizarGoHomeNormal(void);
     void enviarTelemetria(void);
     void enviarEstadoActualPorUart(void);
+    void procesarTeleoperacion(void);
 
-    /*
-     * ================================================================
-     * CALLBACKS DE ENTRADA A ESTADO
-     * ================================================================
-     */
+    /* ====================================================================
+     * CALLBACKS: TRANSICIÓN DE ENTRADA (On-Enter)
+     * ==================================================================== */
     void onEnterBoot(void);
     void onEnterInit(void);
     void onEnterIdle(void);
@@ -249,11 +233,9 @@ private:
     void onEnterFault(void);
     void onEnterEmergency(void);
 
-    /*
-     * ================================================================
-     * CALLBACKS DE UPDATE POR ESTADO
-     * ================================================================
-     */
+    /* ====================================================================
+     * CALLBACKS: EJECUCIÓN PERIÓDICA (On-Update)
+     * ==================================================================== */
     void onUpdateInit(void);
     void onUpdateIdle(void);
     void onUpdateManual(void);
@@ -264,11 +246,9 @@ private:
     void onUpdateFault(void);
     void onUpdateEmergency(void);
 
-    /*
-     * ================================================================
-     * CALLBACKS DE COMANDOS LOCALES
-     * ================================================================
-     */
+    /* ====================================================================
+     * CALLBACKS: PROCESAMIENTO DE COMANDOS LOCALES
+     * ==================================================================== */
     void onManualCommand(const char* rawCommand);
     void onRecordingCommand(const char* rawCommand);
     void onAutoReadyCommand(const char* rawCommand);
@@ -279,4 +259,4 @@ private:
 
 } // namespace Station
 
-#endif
+#endif	/* STATION_CONTROLLER_HPP */
