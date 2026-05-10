@@ -59,9 +59,10 @@ enum class UartCommand {
     M101_AutoMode,			/**< Prepara el buffer para ejecución automática. */
     M110_StartRecording,	/**< Inicia el streaming de telemetría para guardado. */
     M111_StopRecording,		/**< Finaliza el guardado y retorna a Manual. */
-    M112_StartPlayback,		/**< Inicia el consumo de la FIFO de trayectoria. */
-    M113_StopPausePlayback,	/**< Pausa la ejecución de la trayectoria. */
-    M114_ResumePlayback,	/**< Reanuda la trayectoria pausada. */
+    M112_StartPlayback,		/**< Inicia la ejecución automática. */
+    M113_EndPlayback,		/**< Fin de trayectoria enviado por Python. */
+    M114_PausePlayback,	/**< Pausa la ejecución de la trayectoria. */
+    M115_ResumePlayback,	/**< Reanuda la trayectoria pausada. */
     M00_EStop,				/**< Parada de emergencia. Corta potencia inmediatamente. */
 
     Status					/**< Solicita el estado actual de la FSM. */
@@ -160,6 +161,7 @@ private:
      * MEMORIA DINÁMICA: BUFFER CIRCULAR PARA TRAYECTORIAS (AUTO)
      * ==================================================================== */
     static constexpr uint8_t AUTO_FIFO_CAPACITY = 64U;
+    static constexpr uint8_t AUTO_CHUNK_SIZE = 32U;
     PendingAutoCommand _autoFifo[AUTO_FIFO_CAPACITY];
 
     uint8_t _autoFifoHead;
@@ -170,6 +172,10 @@ private:
     bool _hasActiveAutoPoint;
     bool _chunkRequestPending;
     bool _waitingFirstChunkAfterStart;
+    bool _playbackEofReceived;
+    uint8_t _pointsReceivedForCurrentRequest;
+    bool _autoPointCommandInjected;
+    uint32_t _autoPointStartTick;
 
 
     /* ====================================================================

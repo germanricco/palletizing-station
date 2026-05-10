@@ -39,10 +39,11 @@ namespace Station {
  *   AutoReady --M99-->  Idle
  *   AutoReady --M98-->  Init
  *
- *   AutoRunning --M113--> AutoPaused
+ *   AutoRunning --M113--> Fin de datos desde Python; espera vaciar FIFO y vuelve a AutoReady
+ *   AutoRunning --M114--> AutoPaused
  *   AutoRunning --M99-->  Idle
  *
- *   AutoPaused --M114--> AutoRunning
+ *   AutoPaused --M115--> AutoRunning
  *   AutoPaused --M113--> AutoReady
  *   AutoPaused --M99-->  Idle
  *
@@ -75,10 +76,14 @@ Controller::Controller(TerminalSerial& terminal,
       _autoFifoHead(0U),
       _autoFifoTail(0U),
       _autoFifoCount(0U),
-      _activeAutoPoint{false, 0.00f, 0.00f, 0.00f},
+      _activeAutoPoint{false, 0.00f, 0.00f, 0.00f, 0},
       _hasActiveAutoPoint(false),
       _chunkRequestPending(false),
-	  _waitingFirstChunkAfterStart(false){
+      _waitingFirstChunkAfterStart(false),
+      _playbackEofReceived(false),
+      _pointsReceivedForCurrentRequest(0U),
+      _autoPointCommandInjected(false),
+      _autoPointStartTick(0U){
 }
 
 
@@ -115,8 +120,14 @@ void Controller::update(uint32_t nowMs) {
     	}
     }
 
-    // Lecutra de Comandos UART
-    if (_terminal.hayComandoPendiente()) {
+    // Lectura de comandos UART.
+    // Durante streaming pueden llegar muchas líneas G1 seguidas; por eso drenamos
+    // varios comandos por ciclo en vez de procesar solo uno.
+    constexpr uint8_t MAX_COMANDOS_UART_POR_UPDATE = 12U;
+    uint8_t comandosProcesados = 0U;
+
+    while (_terminal.hayComandoPendiente() &&
+           comandosProcesados < MAX_COMANDOS_UART_POR_UPDATE) {
         const char* comando = _terminal.obtenerComandoPendiente();
 
         if (std::strcmp(comando, "STATUS") == 0) {
@@ -130,6 +141,7 @@ void Controller::update(uint32_t nowMs) {
         }
 
         _terminal.limpiarComandoPendiente();
+        comandosProcesados++;
     }
 
     switch (_state) {
@@ -225,8 +237,9 @@ const char* Controller::toString(UartCommand command) {
         case UartCommand::M110_StartRecording:    return "M110";
         case UartCommand::M111_StopRecording:     return "M111";
         case UartCommand::M112_StartPlayback:     return "M112";
-        case UartCommand::M113_StopPausePlayback: return "M113";
-        case UartCommand::M114_ResumePlayback:    return "M114";
+        case UartCommand::M113_EndPlayback:       return "M113";
+        case UartCommand::M114_PausePlayback:     return "M114";
+        case UartCommand::M115_ResumePlayback:    return "M115";
         case UartCommand::M00_EStop:              return "M00";
         case UartCommand::Status:                 return "STATUS";
         default:                                  return "Unknown";
@@ -273,8 +286,9 @@ UartCommand Controller::parseUartCommand(const char* text) {
     if (std::strcmp(cmd, "M110") == 0)   return UartCommand::M110_StartRecording;
     if (std::strcmp(cmd, "M111") == 0)   return UartCommand::M111_StopRecording;
     if (std::strcmp(cmd, "M112") == 0)   return UartCommand::M112_StartPlayback;
-    if (std::strcmp(cmd, "M113") == 0)   return UartCommand::M113_StopPausePlayback;
-    if (std::strcmp(cmd, "M114") == 0)   return UartCommand::M114_ResumePlayback;
+    if (std::strcmp(cmd, "M113") == 0)   return UartCommand::M113_EndPlayback;
+    if (std::strcmp(cmd, "M114") == 0)   return UartCommand::M114_PausePlayback;
+    if (std::strcmp(cmd, "M115") == 0)   return UartCommand::M115_ResumePlayback;
     if (std::strcmp(cmd, "M00") == 0)    return UartCommand::M00_EStop;
     if (std::strcmp(cmd, "STATUS") == 0) return UartCommand::Status;
 
@@ -352,10 +366,14 @@ void Controller::clearAutoFifo(void) {
 
 void Controller::clearAutoRuntimeState(void) {
     clearAutoFifo();
-    _activeAutoPoint = {false, 0.00f, 0.00f, 0.00f};
+    _activeAutoPoint = {false, 0.00f, 0.00f, 0.00f, 0};
     _hasActiveAutoPoint = false;
     _chunkRequestPending = false;
     _waitingFirstChunkAfterStart = false;
+    _playbackEofReceived = false;
+    _pointsReceivedForCurrentRequest = 0U;
+    _autoPointCommandInjected = false;
+    _autoPointStartTick = 0U;
 }
 
 bool Controller::enqueueAutoPoint(const PendingAutoCommand& cmd) {
@@ -399,54 +417,65 @@ void Controller::processActiveAutoPoint(void) {
         return;
     }
 
-    // Usamos variables estaticas para mantener seguimiento del tiempo entre ciclos
-    static bool comandoInyectado = false;
-    static uint32_t tiempo_ultimo_punto = 0;
-    uint32_t nowMs = HAL_GetTick();
+    const uint32_t nowMs = HAL_GetTick();
 
-    // Si es un punto nuevo, lo inyectamos al hardware
-    if(!comandoInyectado) {
-    	float anguloGradosQ1 = _activeAutoPoint.q1 * 57.29578f;
+    if (!_autoPointCommandInjected) {
+        const float anguloGradosQ1 = _activeAutoPoint.q1 * 57.29578f;
 
-    	_servoBase.commandDirectPosition(anguloGradosQ1);
-    	// _servoHombro.commandDirectPosition(_activeAutoPoint.q2;
+        _servoBase.commandDirectPosition(anguloGradosQ1);
+        // TODO: integrar servo hombro y servo codo cuando estén disponibles.
+        // _servoHombro.commandDirectPosition(_activeAutoPoint.q2 * 57.29578f);
+        // _servoCodo.commandDirectPosition(_activeAutoPoint.q3 * 57.29578f);
 
-    	// EJECUCIÓN SINCRONIZADA DEL ACTUADOR
-    	if (_activeAutoPoint.a1 == 1) {
-    		// Si la bomba no estaba prendida, la prendemos
-    		if (_efectorFinal.getState() != ActuatorState::Suction &&
-    				_efectorFinal.getState() != ActuatorState::Holding) {
-    	            _efectorFinal.commandSuction(1.0f);
-    		}
-    	} else {
-    		// Si estaba prendida, la apagamos/purgamos
-    		if (_efectorFinal.getState() != ActuatorState::Idle &&
-    				_efectorFinal.getState() != ActuatorState::Releasing) {
-    			_efectorFinal.commandRelease();
-    		}
-    	}
+        if (_activeAutoPoint.a1 == 1U) {
+            if (_efectorFinal.getState() != ActuatorState::Suction &&
+                _efectorFinal.getState() != ActuatorState::Holding) {
+                _efectorFinal.commandSuction(1.0f);
+                _tiempoInicioSuccion = nowMs;
+            }
+        } else {
+            if (_efectorFinal.getState() != ActuatorState::Idle &&
+                _efectorFinal.getState() != ActuatorState::Releasing) {
+                _efectorFinal.commandRelease();
+            }
+        }
 
-    	comandoInyectado = true;
-    	tiempo_ultimo_punto = nowMs;	// Marcamos el inicio del reloj para este waypoint
+        _autoPointCommandInjected = true;
+        _autoPointStartTick = nowMs;
     }
 
-    // Temporizador estricto de trayectoria a 20ms (50Hz)
-    if ((nowMs - tiempo_ultimo_punto) >= 20) {
-    	_hasActiveAutoPoint = false;
-    	comandoInyectado = false;
+    if ((nowMs - _autoPointStartTick) >= 20U) {
+        _hasActiveAutoPoint = false;
+        _autoPointCommandInjected = false;
     }
 }
 
 void Controller::requestNextChunkIfNeeded(void) {
-	// Pedir el siguiente cuando este a la mitad (queue de 32)
-    if (_autoFifoCount > (AUTO_FIFO_CAPACITY / 2)) return;
+    if (_playbackEofReceived) {
+        return;
+    }
 
-    if (_chunkRequestPending) return;
+    if (_chunkRequestPending) {
+        return;
+    }
 
-    _terminal.enviarNormal("REQ_CHUNK\r\n");
-    _chunkRequestPending = true;
+    const uint8_t freeSlots = static_cast<uint8_t>(AUTO_FIFO_CAPACITY - _autoFifoCount);
 
-    Logger::logINFO("AUTO_RUNNING: FIFO en umbral bajo. Enviado REQ_CHUNK.");
+    if (freeSlots < AUTO_CHUNK_SIZE) {
+        return;
+    }
+
+    char msg[32];
+    std::snprintf(msg, sizeof(msg), "REQ_CHUNK:%u\r\n", AUTO_CHUNK_SIZE);
+
+    // REQ_CHUNK forma parte del protocolo crítico de streaming, por eso va con prioridad HIGH.
+    if (_terminal.enviarACK(msg)) {
+        _chunkRequestPending = true;
+        _pointsReceivedForCurrentRequest = 0U;
+        Logger::logINFO("AUTO_RUNNING: solicitado chunk de %u puntos.", AUTO_CHUNK_SIZE);
+    } else {
+        Logger::logERROR("AUTO_RUNNING: no se pudo enviar REQ_CHUNK.");
+    }
 }
 
 /*
@@ -644,9 +673,18 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
             return makeErr("ERR:INVALID_STATE");
 
         case GlobalState::AutoRunning:
-            if (command == UartCommand::M113_StopPausePlayback) {
+            if (command == UartCommand::M113_EndPlayback) {
+                // Python avisa que ya no enviará más puntos.
+                // No respondemos ACK_M113 todavía: esperamos consumir la FIFO completa.
+                _playbackEofReceived = true;
+                _chunkRequestPending = false;
+                _pointsReceivedForCurrentRequest = 0U;
+                Logger::logINFO("AUTO_RUNNING: EOF recibido desde Python. Esperando vaciar FIFO.");
+                return makeHandledNoReply();
+            }
+            if (command == UartCommand::M114_PausePlayback) {
                 transitionTo(GlobalState::AutoPaused, nowMs);
-                return makeAck("ACK_M113");
+                return makeAck("ACK_M114");
             }
             if (command == UartCommand::M99_GoIdle) {
                 transitionTo(GlobalState::Idle, nowMs);
@@ -655,11 +693,11 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
             return makeErr("ERR:INVALID_STATE");
 
         case GlobalState::AutoPaused:
-            if (command == UartCommand::M114_ResumePlayback) {
+            if (command == UartCommand::M115_ResumePlayback) {
                 transitionTo(GlobalState::AutoRunning, nowMs);
-                return makeAck("ACK_M114");
+                return makeAck("ACK_M115");
             }
-            if (command == UartCommand::M113_StopPausePlayback) {
+            if (command == UartCommand::M113_EndPlayback) {
                 transitionTo(GlobalState::AutoReady, nowMs);
                 return makeAck("ACK_M113");
             }
@@ -835,16 +873,9 @@ void Controller::onEnterAutoReady(void) {
 void Controller::onEnterAutoRunning(void) {
     Logger::logINFO("FSM -> AutoRunning");
 
-    /*
-     * Al iniciar playback desde AutoReady queremos arrancar limpio.
-     * Si venimos desde AutoPaused por M114, preservamos FIFO y punto activo.
-     */
     if (_previousState != GlobalState::AutoPaused) {
         clearAutoRuntimeState();
-        // Iniciamos asumiendo que ya recibimos el primer chunk
-        _chunkRequestPending = true;
-
-        Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Esperando 1er Chunk...");
+        Logger::logINFO("AUTO_RUNNING: listo para solicitar primer chunk.");
     } else {
         Logger::logINFO("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
     }
@@ -895,8 +926,16 @@ void Controller::onUpdateRecording(void) {
 void Controller::onUpdateAutoReady(void) {}
 
 void Controller::onUpdateAutoRunning(void) {
-	startNextAutoPointIfNeeded();
+    startNextAutoPointIfNeeded();
     processActiveAutoPoint();
+
+    if (_playbackEofReceived && isAutoFifoEmpty() && !_hasActiveAutoPoint) {
+        Logger::logINFO("AUTO_RUNNING: trayectoria finalizada. FIFO vacia.");
+        transitionTo(GlobalState::AutoReady, HAL_GetTick());
+        _terminal.enviarACK("ACK_M113\r\n");
+        return;
+    }
+
     requestNextChunkIfNeeded();
 }
 
@@ -943,14 +982,17 @@ void Controller::onAutoRunningCommand(const char* rawCommand) {
 
     if (!enqueueAutoPoint(parsedCmd)) {
         Logger::logERROR("AUTO_RUNNING: FIFO llena. Punto descartado.");
+        _terminal.enviarACK("ERR:FIFO_FULL\r\n");
         return;
     }
 
-    // Al llegar datos nuevos dejamos de considerar pendiente el pedido anterior.
-    // SOLO liberar la bandera de petición si la cola de memoria ya se recuperó.
-    // Esto evita enviar multiples REQ_CHUNK mientras se recibe el paquete.
-    if (_chunkRequestPending && (_autoFifoCount > (AUTO_FIFO_CAPACITY / 2))) {
-    	_chunkRequestPending = false;
+    if (_chunkRequestPending) {
+        _pointsReceivedForCurrentRequest++;
+
+        if (_pointsReceivedForCurrentRequest >= AUTO_CHUNK_SIZE) {
+            _chunkRequestPending = false;
+            _pointsReceivedForCurrentRequest = 0U;
+        }
     }
 }
 

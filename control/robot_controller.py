@@ -169,15 +169,19 @@ class RobotController:
             elif raw_message.startswith("ACK_M"):
                 self._handle_state_ack(raw_message)
 
-                # Streamer tambien requiere enterarse de confirmacion ACK_M112
-                if raw_message == "ACK_M112":
-                    print("ACK_M112 Recibido desde STM32")
+                # El streamer necesita conocer el inicio y el fin real de la trayectoria.
+                # ACK_M113 ya no significa "pausado" durante AUTO_RUNNING, sino "FIFO consumida".
+                if raw_message in ("ACK_M112", "ACK_M113"):
                     self.streamer.process_message(raw_message)
 
-            # Interaccion con el Streamer 
-            elif raw_message == "REQ_CHUNK":
-                print("REQ_CHUNK Recibido desde STM32")
-                # Si el mensaje pertenece al protocolo de streaming, lo delegamos al TrajectoryStreamer
+            # Interaccion con el Streamer.
+            # Aceptamos tanto REQ_CHUNK como REQ_CHUNK:32.
+            elif raw_message.startswith("REQ_CHUNK"):
+                self.streamer.process_message(raw_message)
+
+            # Errores de protocolo/hardware: deben cortar el streaming local.
+            elif raw_message.startswith("ERR:"):
+                self.logger.error(f"Error recibido desde STM32: {raw_message}")
                 self.streamer.process_message(raw_message)
 
             # Mensaje no reconocido

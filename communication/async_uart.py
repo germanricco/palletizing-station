@@ -51,7 +51,7 @@ class AsyncUARTCommunicator(ICommunication):
         self.serial_conn: Optional[serial.Serial] = None
         
         # Cola de transmisión FIFO thread-safe
-        self.tx_queue = queue.Queue(maxsize=500)
+        self.tx_queue = queue.Queue(maxsize=200)
         
         self._running = False
         # Variables para los hilos de RX y TX
@@ -65,7 +65,7 @@ class AsyncUARTCommunicator(ICommunication):
         """Abre el puerto serie y levanta los hilos daemon de trabajo."""
         try:
             # timeout=0.1 es para que serial.readline() no se bloquee infinitamente
-            self.serial_conn = serial.Serial(self.port, self.baudrate, timeout=0.1)
+            self.serial_conn = serial.Serial(self.port, self.baudrate, timeout=0.1, write_timeout=0.1)
             
             self._running = True
             # daemon=True asegura que los hilos se cierren si el programa principal (GUI) se cierra
@@ -130,6 +130,8 @@ class AsyncUARTCommunicator(ICommunication):
                     self.serial_conn.write(encoded_msg)
             except queue.Empty:
                 pass
+            except serial.SerialTimeoutException:
+                print("[UART Error] Timeout escribiendo en el puerto serie.")
             except serial.SerialException as e:
                 print(f"[UART Error] Excepción en escritura TX: {e}")
                 self._running = False
