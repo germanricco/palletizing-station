@@ -103,6 +103,8 @@ public:
     float getAngleDegrees() const;
     float getAngleRadians() const;
 
+    bool isTargetReached() const;
+
 };
 
 #endif /* SERVO_HPP */

@@ -59,6 +59,10 @@ void Servo::init() {
 void Servo::goHome(){
 	_controlMode = ServoControlMode::SmoothPosition;
 	_targetPulse_Q16 = _homePulse_Q16;
+
+	// Purgado de inercias
+	_targetVelocity_Q16 = 0;
+	_currentVelocity_Q16 = 0;
 }
 
 void Servo::commandVelocity(float normalizedVelocity) {
@@ -83,6 +87,10 @@ void Servo::commandVelocity(float normalizedVelocity) {
 void Servo::commandSmoothPosition(float angleDegrees) {
     _controlMode = ServoControlMode::SmoothPosition;
 
+    // Purgado de Inercias
+    _targetVelocity_Q16 = 0;
+    _currentVelocity_Q16 = 0;
+
     // Conversion a microsegundos en punto flotante
     float targetPulseFloat = (angleDegrees * 11.111111f) + 500.0f;
     int64_t target_Intermediate = static_cast<int64_t>(targetPulseFloat * 65536.0f);
@@ -99,6 +107,10 @@ void Servo::commandSmoothPosition(float angleDegrees) {
 
 void Servo::commandDirectPosition(float angleDegrees) {
     _controlMode = ServoControlMode::DirectPosition;
+
+    // Purgado de inercias
+    _targetVelocity_Q16 = 0;
+    _currentVelocity_Q16 = 0;
 
     float targetPulseFloat = (angleDegrees * 11.111111f) + 500.0f;
     int64_t target_Intermediate = static_cast<int64_t>(targetPulseFloat * 65536.0f);
@@ -188,4 +200,16 @@ float Servo::getAngleRadians() const {
 	// (PI / Rango) * (ValorActual - DesplazamientoMinimo
 	float ccr_float = static_cast<float>(_currentCCR_Q16) / 65536.0f;
 	return (ccr_float - 500.0f) * (M_PI / 2000.0f);
+}
+
+bool Servo::isTargetReached() const {
+    if (_controlMode == ServoControlMode::Velocity) {
+        return false; // En modo velocidad pura no hay un destino absoluto
+    }
+
+    int32_t error_Q16 = _targetPulse_Q16 - _currentCCR_Q16;
+    int32_t absError_Q16 = (error_Q16 < 0) ? -error_Q16 : error_Q16;
+
+    // Si el error es menor o igual a la banda muerta (0.5 us), llegamos.
+    return (absError_Q16 <= 32768);
 }

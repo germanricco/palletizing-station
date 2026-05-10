@@ -52,7 +52,7 @@ Actuador efector_final(&TIM2->CCR1, &TIM2->CCR2, 49, 800);
 TerminalSerial terminal(&huart1);
 
 // Controlador
-Station::Controller stationController(terminal, joystick_izquierdo, servo_base);
+Station::Controller stationController(terminal, joystick_izquierdo, servo_base, efector_final);
 
 
 // ==== INICIALIZACION DEL SISTEMA ====
@@ -121,35 +121,35 @@ void Cpp_Main_Loop(void) {
      * RUTINA DE PRUEBA: PERFIL DE VELOCIDAD MOTOR CINTA
      */
     // Ciclo de prueba de 12000 ms (12 segundos)
-    uint32_t tiempo_ciclo = tiempo_actual % 12000;
-    float velocidad_prueba = 0.0f;
+   uint32_t tiempo_ciclo = tiempo_actual % 12000;
+   float velocidad_prueba = 0.0f;
 
-    if (tiempo_ciclo < 2000) {
-    	// Fase 1: Reposo (0 a 2 seg)
-        velocidad_prueba = 0.0f;
-    }
-    else if (tiempo_ciclo < 5000) {
-        // Fase 2: Aceleración Lineal (2 a 5 seg)
-        // Mapea el tiempo de (2000 a 5000) al rango de velocidad (0.0 a 1.0)
-        velocidad_prueba = static_cast<float>(tiempo_ciclo - 2000) / 3000.0f;
-    }
-    else if (tiempo_ciclo < 8000) {
-        // Fase 3: Mantenimiento Velocidad Máxima (5 a 8 seg)
-        velocidad_prueba = 1.0f;
-    }
-    else if (tiempo_ciclo < 11000) {
-        // Fase 4: Desaceleración Lineal (8 a 11 seg)
-        // Mapea el tiempo de (8000 a 11000) al rango de velocidad (1.0 a 0.0)
-        velocidad_prueba = 1.0f - (static_cast<float>(tiempo_ciclo - 8000) / 3000.0f);
-    }
-    else {
-        // Fase 5: Reposo de estabilización (11 a 12 seg)
-        velocidad_prueba = 0.0f;
-    }
+   if (tiempo_ciclo < 2000) {
+   	// Fase 1: Reposo (0 a 2 seg)
+       velocidad_prueba = 0.0f;
+   }
+   else if (tiempo_ciclo < 5000) {
+       // Fase 2: Aceleración Lineal (2 a 5 seg)
+       // Mapea el tiempo de (2000 a 5000) al rango de velocidad (0.0 a 1.0)
+       velocidad_prueba = static_cast<float>(tiempo_ciclo - 2000) / 3000.0f;
+   }
+   else if (tiempo_ciclo < 8000) {
+       // Fase 3: Mantenimiento Velocidad Máxima (5 a 8 seg)
+       velocidad_prueba = 1.0f;
+   }
+   else if (tiempo_ciclo < 11000) {
+       // Fase 4: Desaceleración Lineal (8 a 11 seg)
+       // Mapea el tiempo de (8000 a 11000) al rango de velocidad (1.0 a 0.0)
+       velocidad_prueba = 1.0f - (static_cast<float>(tiempo_ciclo - 8000) / 3000.0f);
+   }
+   else {
+       // Fase 5: Reposo de estabilización (11 a 12 seg)
+       velocidad_prueba = 0.0f;
+   }
 
-    // Inyección de la velocidad calculada al motor
-    //motor_cinta.setSpeed(velocidad_prueba);
-    float velocidad_motor_cinta = velocidad_prueba;
+   // Inyección de la velocidad calculada al motor
+   //motor_cinta.setSpeed(velocidad_prueba);
+   float velocidad_motor_cinta = velocidad_prueba;
 
     if (sensor_fin_cinta.objetoDetectado())
     {
@@ -157,47 +157,6 @@ void Cpp_Main_Loop(void) {
     }
 
     motor_cinta.setSpeed(velocidad_motor_cinta);
-
-
-    // ===================================================================================
-
-    /**
-     * RUTINA DE PRUEBA: Actuador (Efector Final)
-     */
-    static uint32_t tiempo_inicio_succion = 0;
-    const uint32_t DURACION_SUCCION_MS = 2000;
-
-    efector_final.update(tiempo_actual);
-
-    // 2. Transición automática: De Succión (100%) a Retención (10%) por tiempo
-    if (efector_final.getState() == ActuatorState::Suction) {
-    	if ((tiempo_actual - tiempo_inicio_succion) >= DURACION_SUCCION_MS) {
-    		efector_final.commandHold(0.2f); // Baja la potencia PWM de la bomba al 10%
-            Logger::logINFO("ACTUADOR: Vacio asegurado. Pasando a Holding (10% PWM).");
-        }
-    }
-
-    if (joystick_izquierdo.HayPulsacionValida()) {
-    	Logger::logINFO("MANUAL: Pulsador izq accionado.");
-        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1); // Feedback visual
-
-        ActuatorState estado_actual = efector_final.getState();
-
-        // Evaluar estado para decidir la acción contraria
-        if (estado_actual == ActuatorState::Idle || estado_actual == ActuatorState::Releasing) {
-        	// Si estaba apagado, encender al máximo
-            efector_final.commandSuction(1.0f);
-            tiempo_inicio_succion = tiempo_actual; // Registrar inicio para el timeout
-            Logger::logINFO("ACTUADOR: Iniciando Succion (100% PWM).");
-        }
-        else if (estado_actual == ActuatorState::Suction || estado_actual == ActuatorState::Holding) {
-            // Si estaba agarrando la pieza, soltarla
-            efector_final.commandRelease();
-            Logger::logINFO("ACTUADOR: Liberando pieza (Apertura de Valvula).");
-        }
-    }
-
-    // ===================================================================================
 
     stationController.update(tiempo_actual);
 

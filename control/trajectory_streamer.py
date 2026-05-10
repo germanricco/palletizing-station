@@ -15,7 +15,7 @@ class TrajectoryStreamer:
     Implementa el protocolo de Handshake estricto con el microcontrolador.
     """
     # ==== INICIALIZACION ====
-    def __init__(self, comm, chunk_size: int = 15, precision: int = 4, num_dofs: int = 3):
+    def __init__(self, comm, chunk_size: int = 32, precision: int = 4, num_dofs: int = 3):
         """
         Inicializa el Streamer.
 
@@ -137,22 +137,13 @@ class TrajectoryStreamer:
 
         # Iteración sobre la vista matricial
         for row in chunk_view:
-            # Inyección de Actuadores Dinámica
-            if has_actuators:
-                current_valve = bool(row[self.num_dofs])
-                if current_valve != self._last_valve_state:
-                    actuator_cmd = "M3" if current_valve else "M5"
-                    self.comm.send_message(actuator_cmd)
-                    self._last_valve_state = current_valve
-
-            # Construccion Dinamica de Cinemática (Radianes)
-            kinematic_values = row[:self.num_dofs]
-
-            # Formateo con precision deseada
-            formatted_coords = ",".join([f"{val:.{self.precision}f}" for val in kinematic_values])
+            # Construccion Unificada: Cinemática + Estado de Actuador
+            s1, s2, s3 = row[0], row[1], row[2]
             
-            # Construccion del G-Code
-            cmd = f"G1:{formatted_coords}"
+            # Si hay actuador, extraemos su estado (0 o 1). Si no, forzamos 0.
+            a1 = int(row[self.num_dofs]) if has_actuators else 0
+            
+            cmd = f"G1:{s1:.{self.precision}f},{s2:.{self.precision}f},{s3:.{self.precision}f},{a1}"
             self.comm.send_message(cmd)
 
         self._report_progress()

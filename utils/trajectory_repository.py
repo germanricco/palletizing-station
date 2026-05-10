@@ -73,13 +73,14 @@ class TrajectoryRepository:
         Retorna la matriz, o una matriz vacía si ocurre un error.
         """
         safe_name = self._sanitize_filename(name)
-        filepath = os.path.join(self.storage_dir, name)
+
+        filepath = os.path.join(self.storage_dir, safe_name)
 
         # Matriz de retorno por defecto
         empty_fallback = np.empty((0, self.expected_columns), dtype=np.float32)
 
         if not os.path.exists(filepath):
-            self.logger.warning(f"Intento de carga fallido. Archivo '{safe_name}' no encontrado en el repositorio.")
+            self.logger.warning(f"Intento de carga fallido. Archivo '{filepath}' no encontrado en el repositorio.")
             return empty_fallback
             
         try:
