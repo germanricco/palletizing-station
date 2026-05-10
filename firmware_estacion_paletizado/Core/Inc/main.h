@@ -77,6 +77,9 @@ void Error_Handler(void);
 #define LED1_GPIO_Port GPIOB
 #define MotorDC_Pin GPIO_PIN_10
 #define MotorDC_GPIO_Port GPIOB
+#define SENSOR_IR_CINTA_Pin GPIO_PIN_12
+#define SENSOR_IR_CINTA_GPIO_Port GPIOB
+#define SENSOR_IR_CINTA_EXTI_IRQn EXTI15_10_IRQn
 #define BombaSuccion_Pin GPIO_PIN_15
 #define BombaSuccion_GPIO_Port GPIOA
 #define ValvulaRetencion_Pin GPIO_PIN_3

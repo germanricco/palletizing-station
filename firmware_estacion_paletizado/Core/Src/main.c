@@ -471,6 +471,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED1_GPIO_Port, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : SENSOR_IR_CINTA_Pin */
+  GPIO_InitStruct.Pin = SENSOR_IR_CINTA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(SENSOR_IR_CINTA_GPIO_Port, &GPIO_InitStruct);
+
   /*Configure GPIO pins : A1P_Pin A2P_Pin */
   GPIO_InitStruct.Pin = A1P_Pin|A2P_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
@@ -480,6 +486,9 @@ static void MX_GPIO_Init(void)
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 14, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
