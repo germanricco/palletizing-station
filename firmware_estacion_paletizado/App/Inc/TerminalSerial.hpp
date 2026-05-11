@@ -12,19 +12,15 @@
  * ================================================================
  *
  * Clase encargada de:
- * 1) Recibir comandos UART byte a byte por interrupción.
- * 2) Armar líneas completas terminadas en '\n'.
- * 3) Enviar mensajes por UART usando DMA.
- * 4) Gestionar 3 colas de transmisión con prioridad:
- *    - HIGH   : ACK / respuestas críticas del protocolo
- *    - NORMAL : telemetría / eventos normales
- *    - LOW    : logs de depuración
+ * 1) Recibir comandos UART mediante interrupción y guardarlos en
+ *    una cola FIFO circular para soportar transmisiones en ráfaga (Burst).
+ * 2) Enviar mensajes por UART usando DMA sin bloquear el procesador.
+ * 3) Gestionar colas de transmisión con prioridad (HIGH, NORMAL, LOW).
  *
- * Además, esta versión corrige dos problemas importantes:
- * - Se guarda explícitamente qué cola quedó activa cuando arrancó
- *   una TX DMA, para luego descontar exactamente esa cola.
- * - Se protege el buffer RX para que una línea completa pendiente
- *   no sea sobrescrita por bytes nuevos antes de ser procesada.
+ * Mejoras Arquitectónicas:
+ * - RX Queue: Se reemplaza el buffer único por una matriz circular de 64
+ *   posiciones. Esto soluciona la pérdida de datos cuando Python envía
+ *   chunks de 32 waypoints a alta velocidad.
  * ================================================================
  */
 class TerminalSerial {
@@ -45,59 +41,32 @@ public:
      * ------------------------------------------------
      * Slot de cola TX
      * ------------------------------------------------
-     *
-     * Almacena un mensaje ya copiado y su longitud efectiva.
      */
     struct TxSlot {
-        char data[128];
+        char data[96];
         uint16_t len;
     };
 
 public:
-    /*
-     * Constructor.
-     * Recibe el handle UART que utilizará la terminal.
-     */
     explicit TerminalSerial(UART_HandleTypeDef* huart);
 
-    /*
-     * Inicializa la recepción UART en modo interrupción byte a byte.
-     */
-    void init();
 
-    /*
-     * Hook de actualización.
-     * Se deja por compatibilidad y extensión futura.
-     */
+    void init();
     void update();
 
-    /*
-     * Envíos con distintas prioridades.
-     */
+    // API de Transmision
     bool enviarACK(const char* msg);
     bool enviarNormal(const char* msg);
     bool enviarLog(const char* msg);
-
-    /*
-     * Alias histórico para compatibilidad.
-     */
     bool enviarMensaje(const char* msg);
 
-    /*
-     * ------------------------------------------------
-     * Callbacks ISR / HAL
-     * ------------------------------------------------
-     */
+    // Callbacks ISR / HAL
     void onTxCompleteISR();
     void onTxErrorISR();
     void onRxErrorISR();
     void interrupcionRecepcionByte();
 
-    /*
-     * ------------------------------------------------
-     * Gestión de comandos RX
-     * ------------------------------------------------
-     */
+    // API de Recepcion
     bool hayComandoPendiente() const;
     const char* obtenerComandoPendiente() const;
     void limpiarComandoPendiente();
@@ -105,25 +74,30 @@ public:
 private:
     /*
      * ------------------------------------------------
-     * Parámetros internos
+     * Parámetros de dimensionamiento
      * ------------------------------------------------
      */
-    static constexpr uint16_t RX_BUFFER_SIZE = 128;
-    static constexpr uint16_t TX_BUFFER_SIZE = 128;
-    static constexpr uint8_t  TX_QUEUE_LEN   = 8;
+    static constexpr uint8_t  RX_QUEUE_LEN 	 	= 32;	// Capacidad de comandos encolados (Para chunks de 32)
+    static constexpr uint16_t RX_STRING_MAX_LEN = 32;	// Largo máximo de CADA comando (Ej: G1:1.0,2.0,3.0,1)
+    static constexpr uint16_t TX_BUFFER_SIZE 	= 96;	// Largo máximo de TX. Emparejado con el TxSlot
+    static constexpr uint8_t  TX_QUEUE_LEN   	= 16;	// Profundidad de colas TX
 
     UART_HandleTypeDef* _huart;
 
     /*
      * ------------------------------------------------
-     * RX
+     * RX - Cola Circular de Comandos (Ring Buffer)
      * ------------------------------------------------
      */
     volatile uint8_t _rxByte;
-    char _rxBuffer[RX_BUFFER_SIZE];
-    volatile uint16_t _rxIndex;
-    volatile bool _comandoListo;
-    volatile bool _rxOverflow;
+    char _rxBuffers[RX_QUEUE_LEN][RX_STRING_MAX_LEN];
+
+    volatile uint8_t _rxHead;	// Puntero de lectura (Main Loop)
+    volatile uint8_t _rxTail;	// Puntero de escritura (ISR UART)
+    volatile uint8_t _rxCount;	// Cantidad de líneas/comandos completos listos
+
+    volatile uint16_t _rxIndex;	// Índice del byte en la línea actual (_rxTail)
+    volatile bool _rxOverflow;	// Bandera de seguridad por línea excesivamente larga
 
     /*
      * ------------------------------------------------
@@ -143,18 +117,12 @@ private:
     volatile uint8_t _hN, _tN, _cN;
     volatile uint8_t _hL, _tL, _cL;
 
-    /*
-     * Estado de TX activa.
-     */
+    // Estado TX activa
     volatile bool _txBusy;
     volatile TxPriority _txActivePriority;
 
 private:
-    /*
-     * ------------------------------------------------
-     * Utilidades internas
-     * ------------------------------------------------
-     */
+    // Utilidades Internas
     bool enqueue(TxPriority prio, const char* msg);
     bool iniciarTx();
     void popActiveQueue();
@@ -163,4 +131,4 @@ private:
     void exitCritical(uint32_t primask);
 };
 
-#endif
+#endif	// TERMINALSERIAL_HPP

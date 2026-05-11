@@ -12,13 +12,11 @@
 TerminalSerial::TerminalSerial(UART_HandleTypeDef* huart)
     : _huart(huart),
       _rxByte(0),
-      _rxBuffer{0},
+      _rxBuffers{0},
+	  _rxHead(0), _rxTail(0), _rxCount(0),
       _rxIndex(0),
-      _comandoListo(false),
       _rxOverflow(false),
-      _qHigh{},
-      _qNormal{},
-      _qLow{},
+      _qHigh{}, _qNormal{}, _qLow{},
       _hH(0), _tH(0), _cH(0),
       _hN(0), _tN(0), _cN(0),
       _hL(0), _tL(0), _cL(0),
@@ -30,8 +28,6 @@ TerminalSerial::TerminalSerial(UART_HandleTypeDef* huart)
  * ================================================================
  * INICIALIZACIÓN
  * ================================================================
- *
- * Inicia la recepción UART de a un byte por interrupción.
  */
 void TerminalSerial::init() {
     HAL_UART_Receive_IT(_huart, const_cast<uint8_t*>(&_rxByte), 1);
@@ -66,10 +62,8 @@ void TerminalSerial::exitCritical(uint32_t primask) {
 
 /*
  * ================================================================
- * ENCOLADO DE MENSAJES
+ * ENCOLADO Y GESTION DE TRANSMISION (TX)
  * ================================================================
- *
- * Inserta un mensaje en la cola correspondiente a la prioridad.
  */
 bool TerminalSerial::enqueue(TxPriority prio, const char* msg) {
     if (msg == nullptr) {
@@ -77,7 +71,6 @@ bool TerminalSerial::enqueue(TxPriority prio, const char* msg) {
     }
 
     const size_t len = strnlen(msg, TX_BUFFER_SIZE - 1U);
-
     TxSlot* q = nullptr;
     volatile uint8_t* t = nullptr;
     volatile uint8_t* c = nullptr;
@@ -105,24 +98,17 @@ bool TerminalSerial::enqueue(TxPriority prio, const char* msg) {
             return false;
     }
 
-    /*
-     * Si la cola está llena, no se puede encolar.
-     */
-    if (*c >= TX_QUEUE_LEN) {
-        return false;
-    }
+    // Si la cola esta llena no se puede encolar
+    if (*c >= TX_QUEUE_LEN) return false;
 
-    /*
-     * Copiamos el mensaje al slot apuntado por tail.
-     */
+
+    //Copiamos el mensaje al slot apuntado por tail.
     TxSlot& s = q[*t];
     memcpy(s.data, msg, len);
     s.data[len] = '\0';
     s.len = static_cast<uint16_t>(len);
 
-    /*
-     * Avanzamos tail circularmente y aumentamos count.
-     */
+    //Avanzamos tail circularmente y aumentamos count.
     *t = static_cast<uint8_t>((*t + 1U) % TX_QUEUE_LEN);
     (*c)++;
 
@@ -138,17 +124,12 @@ bool TerminalSerial::enqueue(TxPriority prio, const char* msg) {
  * e intenta iniciar el DMA.
  */
 bool TerminalSerial::iniciarTx() {
-    if (_txBusy) {
-        return false;
-    }
+    if (_txBusy) return false;
 
     TxSlot* slot = nullptr;
     TxPriority prio = TxPriority::NONE;
 
-    /*
-     * Selección por prioridad:
-     * HIGH > NORMAL > LOW
-     */
+    // Seleccion de Prioridad
     if (_cH > 0U) {
         slot = &_qHigh[_hH];
         prio = TxPriority::HIGH;
@@ -162,11 +143,8 @@ bool TerminalSerial::iniciarTx() {
         return false;
     }
 
-    /*
-     * Si el DMA arranca correctamente, se marca:
-     * - TX ocupada
-     * - prioridad activa
-     */
+
+    // Si el DMA arranca correctamente: TX ocupada y Prioridad activa
     if (HAL_UART_Transmit_DMA(_huart,
                               reinterpret_cast<uint8_t*>(slot->data),
                               slot->len) == HAL_OK) {
@@ -175,9 +153,7 @@ bool TerminalSerial::iniciarTx() {
         return true;
     }
 
-    /*
-     * Si el DMA no pudo arrancar, no se consume nada.
-     */
+    //Si el DMA no pudo arrancar, no se consume nada.
     _txBusy = false;
     _txActivePriority = TxPriority::NONE;
     return false;
@@ -288,11 +264,9 @@ bool TerminalSerial::enviarMensaje(const char* msg) {
  */
 void TerminalSerial::onTxCompleteISR() {
     uint32_t p = enterCritical();
-
     popActiveQueue();
     _txBusy = false;
     iniciarTx();
-
     exitCritical(p);
 }
 
@@ -307,89 +281,72 @@ void TerminalSerial::onTxCompleteISR() {
  */
 void TerminalSerial::onTxErrorISR() {
     uint32_t p = enterCritical();
-
     _txBusy = false;
     _txActivePriority = TxPriority::NONE;
     iniciarTx();
-
     exitCritical(p);
 }
 
+
+
+
 /*
  * ================================================================
- * CALLBACK DE ERROR EN RX
+ * RECEPCIÓN BYTE A BYTE (RX RING BUFFER)
  * ================================================================
- *
- * Recupera el estado de recepción ante errores UART.
  */
 void TerminalSerial::onRxErrorISR() {
     uint32_t p = enterCritical();
 
+    // Reseteamos el comando en construccion actual
     _rxIndex = 0U;
-    _rxBuffer[0] = '\0';
-    _comandoListo = false;
     _rxOverflow = false;
+    _rxBuffers[_rxTail][0] = '\0';
 
     HAL_UART_Receive_IT(_huart, const_cast<uint8_t*>(&_rxByte), 1);
 
     exitCritical(p);
 }
 
-/*
- * ================================================================
- * RECEPCIÓN BYTE A BYTE
- * ================================================================
- *
- * Política:
- * - '\r' se ignora
- * - '\n' cierra la línea
- * - si ya hay un comando pendiente, se descartan nuevos bytes
- *   para no sobrescribir la línea todavía no procesada
- * - si el buffer se llena, se descarta el resto de la línea actual
- */
+// Recepcion Byte a Byte
 void TerminalSerial::interrupcionRecepcionByte() {
     /*
-     * Si ya hay una línea completa pendiente de ser procesada,
-     * descartamos bytes nuevos hasta que el loop principal la consuma.
+     * Control de flujo: Si el buffer circular esta lleno, descartamos
+     * los bytes nuevos para proteger la memoria, hasta que el main loop
+     * procese comandos mediante limpiarComandoPendiente().
      */
-    if (_comandoListo) {
-        HAL_UART_Receive_IT(_huart, const_cast<uint8_t*>(&_rxByte), 1);
-        return;
-    }
+	if (_rxCount >= RX_QUEUE_LEN) {
+	        HAL_UART_Receive_IT(_huart, const_cast<uint8_t*>(&_rxByte), 1);
+	        return;
+	    }
 
-    if (_rxByte == '\r') {
-        /*
-         * Se ignora CR para soportar terminales con "\r\n".
-         */
-    } else if (_rxByte == '\n') {
-        /*
-         * Si la línea sufrió overflow, se descarta completa.
-         */
-        if (_rxOverflow) {
-            _rxBuffer[0] = '\0';
-            _rxIndex = 0U;
-            _rxOverflow = false;
-            _comandoListo = false;
-        } else {
-            _rxBuffer[_rxIndex] = '\0';
-            _comandoListo = true;
-        }
-    } else {
-        if (_rxIndex < (RX_BUFFER_SIZE - 1U)) {
-            _rxBuffer[_rxIndex++] = static_cast<char>(_rxByte);
-        } else {
-            /*
-             * No se escribe fuera del buffer.
-             * Se marca overflow y se descarta el resto de la línea.
-             */
-            _rxOverflow = true;
-        }
-    }
+	if (_rxByte == '\r') {
+		// Ignoramos CR (\r) para limpiar formato nativo.
+	} else if (_rxByte == '\n') {
+		if (_rxOverflow) {
+			// Descartamos esta línea malformada/muy larga, pero mantenemos estado FIFO.
+			_rxIndex = 0U;
+			_rxOverflow = false;
+		} else {
+			// Línea completada con éxito. Colocamos fin de string.
+			_rxBuffers[_rxTail][_rxIndex] = '\0';
 
-    /*
-     * Rearmado de la recepción del próximo byte.
-     */
-    HAL_UART_Receive_IT(_huart, const_cast<uint8_t*>(&_rxByte), 1);
+	        // Avanzamos el puntero de escritura de forma circular.
+	        _rxTail = static_cast<uint8_t>((_rxTail + 1U) % RX_QUEUE_LEN);
+	        _rxCount++;
+
+	        // Preparamos índice para el siguiente comando
+	        _rxIndex = 0U;
+	    }
+	} else {
+		if (_rxIndex < (RX_STRING_MAX_LEN - 1U)) {
+			_rxBuffers[_rxTail][_rxIndex++] = static_cast<char>(_rxByte);
+		} else {
+			_rxOverflow = true;
+		}
+	}
+	// Rearme de la interrupción
+	HAL_UART_Receive_IT(_huart, const_cast<uint8_t*>(&_rxByte), 1);
 }
 
 /*
@@ -398,16 +355,27 @@ void TerminalSerial::interrupcionRecepcionByte() {
  * ================================================================
  */
 bool TerminalSerial::hayComandoPendiente() const {
-    return _comandoListo;
+	return (_rxCount > 0U);
 }
 
 const char* TerminalSerial::obtenerComandoPendiente() const {
-    return _rxBuffer;
+	if (_rxCount > 0U) {
+		// Entregamos puntero a la cadena más antigua (Head)
+	    return const_cast<const char*>(_rxBuffers[_rxHead]);
+	}
+	return nullptr;
 }
 
 void TerminalSerial::limpiarComandoPendiente() {
-    memset(_rxBuffer, 0, sizeof(_rxBuffer));
-    _rxIndex = 0U;
-    _comandoListo = false;
-    _rxOverflow = false;
+    // Al modificar _rxCount y _rxHead, competimos directamente con la ISR.
+    // Es obligatorio entrar en sección crítica.
+    uint32_t p = enterCritical();
+
+    if (_rxCount > 0U) {
+        // "Limpiamos" el comando simplemente avanzando el Head
+        _rxHead = static_cast<uint8_t>((_rxHead + 1U) % RX_QUEUE_LEN);
+        _rxCount--;
+    }
+
+    exitCritical(p);
 }
