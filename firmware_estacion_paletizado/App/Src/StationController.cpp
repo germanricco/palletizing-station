@@ -75,10 +75,8 @@ Controller::Controller(TerminalSerial& terminal,
       _autoFifoHead(0U),
       _autoFifoTail(0U),
       _autoFifoCount(0U),
-      _activeAutoPoint{false, 0.00f, 0.00f, 0.00f},
-      _hasActiveAutoPoint(false),
       _chunkRequestPending(false),
-	  _waitingFirstChunkAfterStart(false){
+	  _lastTrajectoryTick(0U) {
 }
 
 
@@ -96,11 +94,7 @@ void Controller::init(void) {
     onEnterState(_state);
 }
 
-/*
- * ================================================================
- * UPDATE PRINCIPAL DEL CONTROLADOR
- * ================================================================
- */
+// UPDATE PRINCIPAL DEL CONTROLADOR
 void Controller::update(uint32_t nowMs) {
     if (!_initialized) init();
 
@@ -136,7 +130,6 @@ void Controller::update(uint32_t nowMs) {
         case GlobalState::Boot:
             transitionTo(GlobalState::Init, nowMs);
             break;
-
         default:
             break;
     }
@@ -150,55 +143,25 @@ void Controller::update(uint32_t nowMs) {
         enviarTelemetria();
     }
 }
+// GETTERS Y AYUDAS PUBLICAS
+GlobalState Controller::getState(void) const { return _state; }
 
-/*
- * ================================================================
- * GETTERS Y AYUDAS PÚBLICAS
- * ================================================================
- */
-GlobalState Controller::getState(void) const {
-    return _state;
-}
+GlobalState Controller::getPreviousState(void) const { return _previousState; }
 
-GlobalState Controller::getPreviousState(void) const {
-    return _previousState;
-}
+const char* Controller::getStateName(void) const { return toString(_state); }
 
-const char* Controller::getStateName(void) const {
-    return toString(_state);
-}
+const char* Controller::stateToString(GlobalState state) { return toString(state); }
 
-const char* Controller::stateToString(GlobalState state) {
-    return toString(state);
-}
+bool Controller::didStateChange(void) const { return _stateChanged; }
 
-bool Controller::didStateChange(void) const {
-    return _stateChanged;
-}
+void Controller::clearStateChangeFlag(void) { _stateChanged = false; }
 
-void Controller::clearStateChangeFlag(void) {
-    _stateChanged = false;
-}
+void Controller::forceFault(uint32_t nowMs) { transitionTo(GlobalState::Fault, nowMs); }
+
+void Controller::forceEmergency(uint32_t nowMs) { transitionTo(GlobalState::Emergency, nowMs); }
 
 
-/*
- * ================================================================
- * FORZADO DE ESTADOS CRÍTICOS
- * ================================================================
- */
-void Controller::forceFault(uint32_t nowMs) {
-    transitionTo(GlobalState::Fault, nowMs);
-}
-
-void Controller::forceEmergency(uint32_t nowMs) {
-    transitionTo(GlobalState::Emergency, nowMs);
-}
-
-/*
- * ================================================================
- * CONVERSIÓN DE ESTADOS Y COMANDOS A TEXTO
- * ================================================================
- */
+// CONVERSION DE ESTADOS Y COMANDOS A TEXTO
 const char* Controller::toString(GlobalState state) {
     switch (state) {
         case GlobalState::Boot:        return "Boot";
@@ -233,28 +196,20 @@ const char* Controller::toString(UartCommand command) {
     }
 }
 
-/*
- * ================================================================
- * NORMALIZACIÓN Y PARSEO DE COMANDOS UART
- * ================================================================
- */
+
+// NORMALIZACIÓN Y PARSEO DE COMANDOS UART
 void Controller::normalizeToUpperNoSpaces(const char* src, char* dst, uint16_t dstSize) {
-    if ((src == nullptr) || (dst == nullptr) || (dstSize == 0U)) {
-        return;
-    }
+	if (!src || !dst || dstSize == 0U) return;
 
     uint16_t j = 0U;
 
     for (uint16_t i = 0U; src[i] != '\0' && j < (dstSize - 1U); ++i) {
         const unsigned char c = static_cast<unsigned char>(src[i]);
-
         if ((c == ' ') || (c == '\t') || (c == '\r') || (c == '\n')) {
             continue;
         }
-
         dst[j++] = static_cast<char>(std::toupper(c));
     }
-
     dst[j] = '\0';
 }
 
@@ -262,10 +217,7 @@ UartCommand Controller::parseUartCommand(const char* text) {
     char cmd[32] = {0};
     normalizeToUpperNoSpaces(text, cmd, sizeof(cmd));
 
-    if (cmd[0] == '\0') {
-        return UartCommand::None;
-    }
-
+    if (cmd[0] == '\0') return UartCommand::None;
     if (std::strcmp(cmd, "M98") == 0)    return UartCommand::M98_GoInit;
     if (std::strcmp(cmd, "M99") == 0)    return UartCommand::M99_GoIdle;
     if (std::strcmp(cmd, "M100") == 0)   return UartCommand::M100_ManualMode;
@@ -281,20 +233,11 @@ UartCommand Controller::parseUartCommand(const char* text) {
     return UartCommand::Unknown;
 }
 
-/*
- * ================================================================
- * Parser local para comando G:q1,q2,q3
- * ================================================================
- */
 bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd) {
-    if (rawLine == nullptr) {
-        return false;
-    }
+	if (!rawLine) return false;
 
     // Validacion de prefijo "G1:"
-    if ((rawLine[0] != 'G') || (rawLine[1] != '1') || (rawLine[2] != ':')) {
-        return false;
-    }
+	if (rawLine[0] != 'G' || rawLine[1] != '1' || rawLine[2] != ':') return false;
 
     // Buffer modificable local con payload
     char buffer[96] = {0};
@@ -306,43 +249,32 @@ bool Controller::tryParseGCommand(const char* rawLine, PendingAutoCommand& outCm
     char* context = nullptr;
     char* token = strtok_r(buffer, ",", &context);
 
-    while ((token != nullptr) && (tokenCount < 4)) {
+    while (token && tokenCount < 4) {
         tokens[tokenCount++] = token;
         token = strtok_r(nullptr, ",", &context);
     }
 
     // Validacion de cantidad de campos
-    if (tokenCount != 4) {
-        return false;
-    }
+    if (tokenCount != 4) return false;
 
     char* endPtr = nullptr;
-    const float q1 = std::strtof(tokens[0], &endPtr);
-    const float q2 = std::strtof(tokens[1], &endPtr);
-    const float q3 = std::strtof(tokens[2], &endPtr);
-    const uint8_t a1 = static_cast<uint8_t>(std::strtol(tokens[3], &endPtr, 10)); // Actuador
-
     outCmd.valid = true;
-    outCmd.q1 = q1;
-    outCmd.q2 = q2;
-    outCmd.q3 = q3;
-    outCmd.a1 = a1;
+    outCmd.q1 = std::strtof(tokens[0], &endPtr);
+    outCmd.q2 = std::strtof(tokens[1], &endPtr);
+    outCmd.q3 = std::strtof(tokens[2], &endPtr);
+    outCmd.a1 = static_cast<uint8_t>(std::strtol(tokens[3], &endPtr, 10));
 
     return true;
 }
+
 
 /*
  * ================================================================
  * HELPERS FIFO PARA AUTO_RUNNING
  * ================================================================
  */
-bool Controller::isAutoFifoEmpty(void) const {
-    return (_autoFifoCount == 0U);
-}
-
-bool Controller::isAutoFifoFull(void) const {
-    return (_autoFifoCount >= AUTO_FIFO_CAPACITY);
-}
+bool Controller::isAutoFifoEmpty(void) const { return (_autoFifoCount == 0U); }
+bool Controller::isAutoFifoFull(void) const { return (_autoFifoCount >= AUTO_FIFO_CAPACITY); }
 
 void Controller::clearAutoFifo(void) {
     _autoFifoHead = 0U;
@@ -352,20 +284,12 @@ void Controller::clearAutoFifo(void) {
 
 void Controller::clearAutoRuntimeState(void) {
     clearAutoFifo();
-    _activeAutoPoint = {false, 0.00f, 0.00f, 0.00f};
-    _hasActiveAutoPoint = false;
     _chunkRequestPending = false;
-    _waitingFirstChunkAfterStart = false;
-
-    _comandoInyectado = false;
-    _tiempoUltimoPunto = 0U;
+    _lastTrajectoryTick = 0U;
 }
 
 bool Controller::enqueueAutoPoint(const PendingAutoCommand& cmd) {
-    if (isAutoFifoFull()) {
-        return false;
-    }
-
+	if (isAutoFifoFull()) return false;
     _autoFifo[_autoFifoTail] = cmd;
     _autoFifoTail = static_cast<uint8_t>((_autoFifoTail + 1U) % AUTO_FIFO_CAPACITY);
     _autoFifoCount++;
@@ -373,129 +297,68 @@ bool Controller::enqueueAutoPoint(const PendingAutoCommand& cmd) {
 }
 
 bool Controller::dequeueAutoPoint(PendingAutoCommand& cmd) {
-    if (isAutoFifoEmpty()) {
-        return false;
-    }
-
+	if (isAutoFifoEmpty()) return false;
     cmd = _autoFifo[_autoFifoHead];
     _autoFifoHead = static_cast<uint8_t>((_autoFifoHead + 1U) % AUTO_FIFO_CAPACITY);
     _autoFifoCount--;
     return true;
 }
 
-void Controller::startNextAutoPointIfNeeded(void) {
-    if (_hasActiveAutoPoint) {
-        return;
-    }
-
-    PendingAutoCommand nextPoint{};
-    if (!dequeueAutoPoint(nextPoint)) {
-        return;
-    }
-
-    _activeAutoPoint = nextPoint;
-    _hasActiveAutoPoint = true;
-}
-
-void Controller::processActiveAutoPoint(void) {
-    if (!_hasActiveAutoPoint) {
-        return;
-    }
-
-    uint32_t nowMs = HAL_GetTick();
-
-    // Si es un punto nuevo, lo inyectamos al hardware
-    if(!_comandoInyectado) {
-    	float anguloGradosQ1 = _activeAutoPoint.q1 * 57.29578f;
-
-    	_servoBase.commandDirectPosition(anguloGradosQ1);
-    	// _servoHombro.commandDirectPosition(_activeAutoPoint.q2;
-
-    	// EJECUCIÓN SINCRONIZADA DEL ACTUADOR
-    	if (_activeAutoPoint.a1 == 1) {
-    		// Si la bomba no estaba prendida, la prendemos
-    		if (_efectorFinal.getState() != ActuatorState::Suction &&
-    				_efectorFinal.getState() != ActuatorState::Holding) {
-    	            _efectorFinal.commandSuction(1.0f);
-    		}
-    	} else {
-    		// Si estaba prendida, la apagamos/purgamos
-    		if (_efectorFinal.getState() != ActuatorState::Idle &&
-    				_efectorFinal.getState() != ActuatorState::Releasing) {
-    			_efectorFinal.commandRelease();
-    		}
-    	}
-
-    	_comandoInyectado = true;
-    	_tiempoUltimoPunto = nowMs;	// Marcamos el inicio del reloj para este waypoint
-    }
-
-    // Temporizador estricto de trayectoria a 20ms (50Hz)
-    if ((nowMs - _tiempoUltimoPunto) >= 20) {
-    	_hasActiveAutoPoint = false;
-    	_comandoInyectado = false;
-    }
-}
-
 void Controller::requestNextChunkIfNeeded(void) {
-	// Si tenemos suficiente colcho de datos, no hacemos nada
+	// Low Watermark (Histeresis Inferior)
     if (_autoFifoCount >= 16) return;
-
-    // Si ya pedimos datos y estamos esperando que lleguen, no hacemos spam
     if (_chunkRequestPending) return;
 
     Logger::logINFO("AUTO_RUNNING: FIFO baja. Enviado REQ_CHUNK.");
-
     _terminal.enviarNormal("REQ_CHUNK\r\n");
     _chunkRequestPending = true;
 }
 
-/*
- * ================================================================
- * CONSTRUCCIÓN DE RESPUESTAS ACK / ERR
- * ================================================================
- */
+void Controller::gestionarActuadorAuto(uint8_t a1, uint32_t nowMs) {
+    if (a1 == 1) {
+        if (_efectorFinal.getState() != ActuatorState::Suction &&
+            _efectorFinal.getState() != ActuatorState::Holding) {
+
+            _efectorFinal.commandSuction(1.0f);
+            _tiempoInicioSuccion = nowMs; // Correccion Bug: Timeout de vacio
+            Logger::logINFO("ACTUADOR: Iniciando Succion (Auto)");
+        }
+    } else {
+        if (_efectorFinal.getState() != ActuatorState::Idle &&
+            _efectorFinal.getState() != ActuatorState::Releasing) {
+
+            _efectorFinal.commandRelease();
+            Logger::logINFO("ACTUADOR: Liberando pieza (Auto)");
+        }
+    }
+}
+
+
+// CONSTRUCCIÓN DE RESPUESTAS ACK / ERR
 CommandResult Controller::makeAck(const char* ackText) {
-    CommandResult result{};
-    result.handled = true;
-    result.success = true;
+    CommandResult result{true, true, {0}};
     std::snprintf(result.response, sizeof(result.response), "%s\r\n", ackText);
     return result;
 }
 
 CommandResult Controller::makeErr(const char* errText) {
-    CommandResult result{};
-    result.handled = true;
-    result.success = false;
+    CommandResult result{true, false, {0}};
     std::snprintf(result.response, sizeof(result.response), "%s\r\n", errText);
     return result;
 }
 
 CommandResult Controller::makeHandledNoReply(void) {
-    CommandResult result{};
-    result.handled = true;
-    result.success = true;
-    result.response[0] = '\0';
-    return result;
+    return CommandResult{true, true, {0}};
 }
 
 CommandResult Controller::makeNotHandled(void) {
-    CommandResult result{};
-    result.handled = false;
-    result.success = false;
-    result.response[0] = '\0';
-    return result;
+    return CommandResult{false, false, {0}};
 }
 
-/*
- * ================================================================
- * TRANSICIÓN DE ESTADO
- * ================================================================
- */
+
+// TRANSICION DE ESTADO
 void Controller::transitionTo(GlobalState newState, uint32_t nowMs) {
-    if (_state == newState) {
-        return;
-    }
+    if (_state == newState) { return; }
 
     _previousState = _state;
     _state = newState;
@@ -505,11 +368,8 @@ void Controller::transitionTo(GlobalState newState, uint32_t nowMs) {
     onEnterState(_state);
 }
 
-/*
- * ================================================================
- * DESPACHO DE ENTRADA A ESTADO
- * ================================================================
- */
+
+// DESPAHO DE ENTRADA A ESTADO
 void Controller::onEnterState(GlobalState state) {
     switch (state) {
         case GlobalState::Boot:        onEnterBoot(); break;
@@ -526,11 +386,8 @@ void Controller::onEnterState(GlobalState state) {
     }
 }
 
-/*
- * ================================================================
- * DESPACHO DE UPDATE SEGÚN ESTADO
- * ================================================================
- */
+
+// DESPACHO DE UPDATE SEGUN ESTADO
 void Controller::runCurrentState(void) {
     switch (_state) {
         case GlobalState::Init:        onUpdateInit(); break;
@@ -546,11 +403,8 @@ void Controller::runCurrentState(void) {
     }
 }
 
-/*
- * ================================================================
- * PROCESAMIENTO PRINCIPAL DE COMANDOS UART
- * ================================================================
- */
+
+// PROCESAMIENTO PRINCIPAL DE COMANDOS UART
 CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
     if (rawLine == nullptr) {
         return makeErr("ERR:NULL_CMD");
@@ -678,11 +532,8 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
     }
 }
 
-/*
- * ================================================================
- * COMANDOS LOCALES SEGÚN EL ESTADO ACTUAL
- * ================================================================
- */
+
+//COMANDOS LOCALES SEGÚN EL ESTADO ACTUAL
 void Controller::processStateLocalCommand(const char* rawLine) {
     switch (_state) {
         case GlobalState::Manual:
@@ -714,11 +565,8 @@ void Controller::processStateLocalCommand(const char* rawLine) {
     }
 }
 
-/*
- * ================================================================
- * FUNCIONES AUXILIARES DE LA ESTACIÓN
- * ================================================================
- */
+
+// FUNCIONES AUXILIARES DE LA ESTACIÓN
 void Controller::detenerActuadoresManuales(void) {
     _servoBase.commandVelocity(0.0f);
 }
@@ -747,12 +595,7 @@ void Controller::enviarTelemetria(void) {
     	a1 = 1;
     }
 
-    // Armar el mensaje
-    std::snprintf(msg, sizeof(msg),
-                  "T:%.2f,%.2f,%.2f,%d\r\n",
-                  j1_rad, j2_rad, j3_rad, a1);
-
-    // Enviarlo
+    std::snprintf(msg, sizeof(msg), "T:%.2f,%.2f,%.2f,%d\r\n", j1_rad, j2_rad, j3_rad, a1);
     _terminal.enviarNormal(msg);
 }
 
@@ -774,7 +617,7 @@ void Controller::procesarTeleoperacion(void) {
 
     // 2. Actualizar Actuador si hay pulsación
     if (_joystickIzquierdo.HayPulsacionValida()) {
-        Logger::logINFO("TELEOPERACION: pulsador izq accionado. Conmutando LED y Actuador.");
+        Logger::logINFO("TELEOPERACION: pulsador izq accionado.");
         HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1); // Feedback visual
 
         ActuatorState estadoActuador = _efectorFinal.getState();
@@ -790,11 +633,8 @@ void Controller::procesarTeleoperacion(void) {
     }
 }
 
-/*
- * ================================================================
- * CALLBACKS DE ENTRADA A ESTADO
- * ================================================================
- */
+
+// CALLBACKS DE ENTRADA A ESTADO
 void Controller::onEnterBoot(void) {
     Logger::logINFO("FSM -> Boot");
 }
@@ -842,8 +682,10 @@ void Controller::onEnterAutoRunning(void) {
      */
     if (_previousState != GlobalState::AutoPaused) {
         clearAutoRuntimeState();
+        _lastTrajectoryTick = HAL_GetTick(); // Inicia el reloj principal
         Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Listo para solicitar 1er chunk...");
     } else {
+    	_lastTrajectoryTick = HAL_GetTick(); // Resincroniza el reloj al despausar
         Logger::logINFO("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
     }
 }
@@ -873,28 +715,41 @@ void Controller::onEnterEmergency(void) {
     _terminal.enviarNormal("EVT:EMERGENCY\r\n");
 }
 
-/*
- * ================================================================
- * CALLBACKS DE UPDATE POR ESTADO
- * ================================================================
- */
+
+// CALLBACKS DE UPDATE POR ESTADO
 void Controller::onUpdateInit(void) {}
 
 void Controller::onUpdateIdle(void) {}
 
-void Controller::onUpdateManual(void) {
-	procesarTeleoperacion();
-}
+void Controller::onUpdateManual(void) { procesarTeleoperacion(); }
 
-void Controller::onUpdateRecording(void) {
-	procesarTeleoperacion();
-}
+void Controller::onUpdateRecording(void) { procesarTeleoperacion(); }
 
 void Controller::onUpdateAutoReady(void) {}
 
 void Controller::onUpdateAutoRunning(void) {
-	startNextAutoPointIfNeeded();
-    processActiveAutoPoint();
+    uint32_t nowMs = HAL_GetTick();
+
+    // Metrónomo estricto a 50Hz (20ms)
+    if ((nowMs - _lastTrajectoryTick) >= 20U) {
+
+        // Sumar exactamente 20 elimina el drift acumulativo
+        _lastTrajectoryTick += 20U;
+
+        PendingAutoCommand currentPoint{};
+
+        if (dequeueAutoPoint(currentPoint)) {
+            // A. Cinemática
+            float anguloGradosQ1 = currentPoint.q1 * 57.29578f;
+            _servoBase.commandDirectPosition(anguloGradosQ1);
+
+            // B. Actuador (Corregido con timestamp)
+            gestionarActuadorAuto(currentPoint.a1, nowMs);
+        }
+        // Si hay Underflow (FIFO vacía), ignoramos silenciosamente y el brazo mantiene su posición.
+    }
+
+    // Evaluación en background
     requestNextChunkIfNeeded();
 }
 
@@ -904,11 +759,8 @@ void Controller::onUpdateFault(void) {}
 
 void Controller::onUpdateEmergency(void) {}
 
-/*
- * ================================================================
- * CALLBACKS DE COMANDOS LOCALES
- * ================================================================
- */
+
+// CALLBACKS DE COMANDOS LOCALES
 void Controller::onManualCommand(const char* rawCommand) {
     Logger::logINFO("CMD(MANUAL): %s", rawCommand);
 }
@@ -918,34 +770,21 @@ void Controller::onRecordingCommand(const char* rawCommand) {
 }
 
 void Controller::onAutoReadyCommand(const char* rawCommand) {
-    Logger::logINFO("CMD(AUTO_READY): %s", rawCommand);
-
     PendingAutoCommand parsedCmd{};
-
-    if (!tryParseGCommand(rawCommand, parsedCmd)) {
-        Logger::logINFO("AUTO_READY: comando local ignorado o formato G invalido.");
-        return;
-    }
-
-    Logger::logINFO(
-        "AUTO_READY: G ignorado. El primer chunk debe llegar despues de ACK_M112 y ya en AUTO_RUNNING."
-    );
+    if (!tryParseGCommand(rawCommand, parsedCmd)) return;
+    Logger::logINFO("AUTO_READY: G ignorado. Primer chunk inicia despues de ACK_M112.");
 }
 
 void Controller::onAutoRunningCommand(const char* rawCommand) {
     PendingAutoCommand parsedCmd{};
-
-    if (!tryParseGCommand(rawCommand, parsedCmd)) {
-        return;
-    }
+    if (!tryParseGCommand(rawCommand, parsedCmd)) return;
 
     if (!enqueueAutoPoint(parsedCmd)) {
-        Logger::logERROR("AUTO_RUNNING: FIFO llena. Punto descartado. Revisa chunk_size");
+        Logger::logERROR("AUTO_RUNNING: FIFO llena. Punto descartado.");
         return;
     }
 
-    // Solo liberamos el candado de pedicion cuando el nivel de la FIFO haya subido lo suficiente
-    // como para no volver a caer instantaneamente a la zona de peligro
+    // High Watermark (Histeresis superior para soltar el candado de petición)
     if (_chunkRequestPending && (_autoFifoCount >= 24)) {
     	_chunkRequestPending = false;
     }

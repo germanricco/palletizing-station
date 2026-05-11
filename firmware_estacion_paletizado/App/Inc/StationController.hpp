@@ -162,16 +162,6 @@ private:
     // Control de Metrónomo Estricto 50Hz
     uint32_t _lastTrajectoryTick;
 
-    PendingAutoCommand _activeAutoPoint;
-    bool _hasActiveAutoPoint;
-    bool _chunkRequestPending;
-    bool _waitingFirstChunkAfterStart;
-
-    // Variables de control de tiempo real para AutoRunning
-    bool _comandoInyectado;
-	uint32_t _tiempoUltimoPunto;
-
-
     // Metodos Utilitarios
     static const char* toString(GlobalState state);
     static const char* toString(UartCommand command);
@@ -182,34 +172,28 @@ private:
     CommandResult makeErr(const char* errText);
     CommandResult makeHandledNoReply(void);
     CommandResult makeNotHandled(void);
-
     bool tryParseGCommand(const char* rawLine, PendingAutoCommand& outCmd);
 
-    /* ====================================================================
-     * MÉTODOS PRIVADOS: GESTIÓN DE COLA FIFO (STREAMING)
-     * ==================================================================== */
+    // Gestion de Cola FIFO
     bool enqueueAutoPoint(const PendingAutoCommand& cmd);
     bool dequeueAutoPoint(PendingAutoCommand& cmd);
     bool isAutoFifoEmpty(void) const;
     bool isAutoFifoFull(void) const;
     void clearAutoFifo(void);
     void clearAutoRuntimeState(void);
-    void startNextAutoPointIfNeeded(void);
-    void processActiveAutoPoint(void);
-    void requestNextChunkIfNeeded(void);
 
-    /* ====================================================================
-     * MÉTODOS PRIVADOS: MOTOR DE MÁQUINA DE ESTADOS (FSM)
-     * ==================================================================== */
+    // Motor Principal de Trayectoria
+    void requestNextChunkIfNeeded(void);
+    void gestionarActuadorAuto(uint8_t a1, uint32_t nowMs);
+
+    // Maquina de Estados
     void transitionTo(GlobalState newState, uint32_t nowMs);
     void onEnterState(GlobalState state);
     void runCurrentState(void);
     CommandResult handleUartLine(const char* rawLine, uint32_t nowMs);
     void processStateLocalCommand(const char* rawLine);
 
-    /* ====================================================================
-     * MÉTODOS PRIVADOS: RUTINAS DE ACCIÓN ESPECÍFICA
-     * ==================================================================== */
+    // Rutinas de Accion
     void detenerActuadoresManuales(void);
     void realizarServoInitInicial(void);
     void realizarGoHomeNormal(void);
@@ -217,9 +201,7 @@ private:
     void enviarEstadoActualPorUart(void);
     void procesarTeleoperacion(void);
 
-    /* ====================================================================
-     * CALLBACKS: TRANSICIÓN DE ENTRADA (On-Enter)
-     * ==================================================================== */
+    // Callbacks On-Enter
     void onEnterBoot(void);
     void onEnterInit(void);
     void onEnterIdle(void);
@@ -231,9 +213,7 @@ private:
     void onEnterFault(void);
     void onEnterEmergency(void);
 
-    /* ====================================================================
-     * CALLBACKS: EJECUCIÓN PERIÓDICA (On-Update)
-     * ==================================================================== */
+    // Callbacks On-Update
     void onUpdateInit(void);
     void onUpdateIdle(void);
     void onUpdateManual(void);
@@ -244,9 +224,7 @@ private:
     void onUpdateFault(void);
     void onUpdateEmergency(void);
 
-    /* ====================================================================
-     * CALLBACKS: PROCESAMIENTO DE COMANDOS LOCALES
-     * ==================================================================== */
+    // Callbacks locales
     void onManualCommand(const char* rawCommand);
     void onRecordingCommand(const char* rawCommand);
     void onAutoReadyCommand(const char* rawCommand);
