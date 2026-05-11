@@ -86,12 +86,14 @@ class TrajectoryStreamer:
         """
         Enrutador de confirmaciones de la capa de transporte.
         """
-        if self.state == StreamState.WAITING_ACK and msg == "ACK_M112":
-            self.logger.debug("Handshake 'ACK_M112' aceptado. Enviando primer chunk.")
+        clean_msg = msg.strip()
+
+        if self.state == StreamState.WAITING_ACK and clean_msg == "ACK_M112":
+            self.logger.debug("Handshake 'ACK_M112' aceptado. A la espera de buffer STM32...")
             self.state = StreamState.STREAMING
-            self._send_next_chunk()
             
-        elif self.state == StreamState.STREAMING and msg == "REQ_CHUNK":
+        elif self.state == StreamState.STREAMING and clean_msg == "REQ_CHUNK":
+            self.logger.debug("Petición de bloque recibida. Transmitiendo chunk...")
             self._send_next_chunk()
 
     

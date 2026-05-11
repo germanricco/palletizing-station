@@ -156,36 +156,42 @@ class RobotController:
         """
         if not raw_message:
             return
+
+        # Sanitizacion
+        clean_msg = raw_message.strip()
+
+        # Si el mensaje era solo un salto de linea, lo ignoramos
+        if not clean_msg:
+            return
         
         try:
             # Decodificar telemetria (Ej: "T:45.0, 30.0, 15.0, 1, 1")
-            if raw_message.startswith("T:"):
-                self._handle_telemetry(raw_message[2:])
+            if clean_msg.startswith("T:"):
+                self._handle_telemetry(clean_msg[2:])
 
-            elif raw_message.startswith("EVT:"):
-                self._handle_async_event(raw_message[4:])
+            elif clean_msg.startswith("EVT:"):
+                self._handle_async_event(clean_msg[4:])
 
             # Eventos de cambio de estado
-            elif raw_message.startswith("ACK_M"):
-                self._handle_state_ack(raw_message)
+            elif clean_msg.startswith("ACK_M"):
+                self._handle_state_ack(clean_msg)
 
                 # Streamer tambien requiere enterarse de confirmacion ACK_M112
-                if raw_message == "ACK_M112":
-                    print("ACK_M112 Recibido desde STM32")
-                    self.streamer.process_message(raw_message)
+                if clean_msg == "ACK_M112":
+                    self.logger.debug("ACK_M112 Recibido desde firmware. Notificando al Streamer.")
+                    self.streamer.process_message(clean_msg)
 
             # Interaccion con el Streamer 
-            elif raw_message == "REQ_CHUNK":
-                print("REQ_CHUNK Recibido desde STM32")
-                # Si el mensaje pertenece al protocolo de streaming, lo delegamos al TrajectoryStreamer
-                self.streamer.process_message(raw_message)
+            elif clean_msg == "REQ_CHUNK":
+                self.logger.debug("REQ_CHUNK Recibido desde firmware. Delegando envío al Streamer.")
+                self.streamer.process_message(clean_msg)
 
             # Mensaje no reconocido
             else:
-                self.logger.debug(f"Mensaje no reconocido del STM32: {raw_message}")
+                self.logger.debug(f"Mensaje no reconocido del STM32: {clean_msg}")
 
         except Exception as e:
-            self.logger.error(f"Error procesando mensaje RX '{raw_message}': {e}")
+            self.logger.error(f"Error procesando mensaje RX '{clean_msg}': {e}")
 
     def _handle_telemetry(self, data_str: str) -> None:
         """

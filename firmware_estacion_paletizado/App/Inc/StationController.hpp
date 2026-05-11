@@ -6,12 +6,6 @@
  *          - Máquina de Estados Finitos (FSM).
  *          - Ejecución de trayectorias (Streaming) y telemetría.
  *          - Respuestas ACK/ERR del protocolo.
- *
- * @note CRITERIO DE ARRANQUE Y TRANSICIONES SEGURAS:
- *       - Boot -> Init ocurre automáticamente.
- *       - Init queda como estado seguro de espera (Home inicial no forzado).
- *       - M99: Pasa de Init a Idle.
- *       - M98: Permite retorno seguro a Init desde Idle, Manual o AutoReady.
  */
 
 #ifndef STATION_CONTROLLER_HPP
@@ -66,6 +60,7 @@ enum class UartCommand {
 
     Status					/**< Solicita el estado actual de la FSM. */
 };
+
 
 /**
  * @struct CommandResult
@@ -134,17 +129,13 @@ public:
     void forceEmergency(uint32_t nowMs);
 
 private:
-    /* ====================================================================
-     * DEPENDENCIAS FÍSICAS (Inyectadas)
-     * ==================================================================== */
+    // --- Dependencias Fisicas Inyectadas ---
     TerminalSerial& _terminal;
     Joystick& _joystickIzquierdo;
     Servo& _servoBase;
     Actuador& _efectorFinal;
 
-    /* ====================================================================
-     * ESTADO INTERNO DEL CONTROLADOR
-     * ==================================================================== */
+    // --- Variables de Estado Interno del Controlador ---
     GlobalState _state;
     GlobalState _previousState;
 
@@ -166,15 +157,22 @@ private:
     uint8_t _autoFifoTail;
     uint8_t _autoFifoCount;
 
+    bool _chunkRequestPending;
+
+    // Control de Metrónomo Estricto 50Hz
+    uint32_t _lastTrajectoryTick;
+
     PendingAutoCommand _activeAutoPoint;
     bool _hasActiveAutoPoint;
     bool _chunkRequestPending;
     bool _waitingFirstChunkAfterStart;
 
+    // Variables de control de tiempo real para AutoRunning
+    bool _comandoInyectado;
+	uint32_t _tiempoUltimoPunto;
 
-    /* ====================================================================
-     * MÉTODOS PRIVADOS: PARSEO Y UTILIDADES
-     * ==================================================================== */
+
+    // Metodos Utilitarios
     static const char* toString(GlobalState state);
     static const char* toString(UartCommand command);
     static void normalizeToUpperNoSpaces(const char* src, char* dst, uint16_t dstSize);

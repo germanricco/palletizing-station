@@ -356,6 +356,9 @@ void Controller::clearAutoRuntimeState(void) {
     _hasActiveAutoPoint = false;
     _chunkRequestPending = false;
     _waitingFirstChunkAfterStart = false;
+
+    _comandoInyectado = false;
+    _tiempoUltimoPunto = 0U;
 }
 
 bool Controller::enqueueAutoPoint(const PendingAutoCommand& cmd) {
@@ -399,13 +402,10 @@ void Controller::processActiveAutoPoint(void) {
         return;
     }
 
-    // Usamos variables estaticas para mantener seguimiento del tiempo entre ciclos
-    static bool comandoInyectado = false;
-    static uint32_t tiempo_ultimo_punto = 0;
     uint32_t nowMs = HAL_GetTick();
 
     // Si es un punto nuevo, lo inyectamos al hardware
-    if(!comandoInyectado) {
+    if(!_comandoInyectado) {
     	float anguloGradosQ1 = _activeAutoPoint.q1 * 57.29578f;
 
     	_servoBase.commandDirectPosition(anguloGradosQ1);
@@ -426,27 +426,28 @@ void Controller::processActiveAutoPoint(void) {
     		}
     	}
 
-    	comandoInyectado = true;
-    	tiempo_ultimo_punto = nowMs;	// Marcamos el inicio del reloj para este waypoint
+    	_comandoInyectado = true;
+    	_tiempoUltimoPunto = nowMs;	// Marcamos el inicio del reloj para este waypoint
     }
 
     // Temporizador estricto de trayectoria a 20ms (50Hz)
-    if ((nowMs - tiempo_ultimo_punto) >= 20) {
+    if ((nowMs - _tiempoUltimoPunto) >= 20) {
     	_hasActiveAutoPoint = false;
-    	comandoInyectado = false;
+    	_comandoInyectado = false;
     }
 }
 
 void Controller::requestNextChunkIfNeeded(void) {
-	// Pedir el siguiente cuando este a la mitad (queue de 32)
-    if (_autoFifoCount > (AUTO_FIFO_CAPACITY / 2)) return;
+	// Si tenemos suficiente colcho de datos, no hacemos nada
+    if (_autoFifoCount >= 16) return;
 
+    // Si ya pedimos datos y estamos esperando que lleguen, no hacemos spam
     if (_chunkRequestPending) return;
+
+    Logger::logINFO("AUTO_RUNNING: FIFO baja. Enviado REQ_CHUNK.");
 
     _terminal.enviarNormal("REQ_CHUNK\r\n");
     _chunkRequestPending = true;
-
-    Logger::logINFO("AUTO_RUNNING: FIFO en umbral bajo. Enviado REQ_CHUNK.");
 }
 
 /*
@@ -841,10 +842,7 @@ void Controller::onEnterAutoRunning(void) {
      */
     if (_previousState != GlobalState::AutoPaused) {
         clearAutoRuntimeState();
-        // Iniciamos asumiendo que ya recibimos el primer chunk
-        _chunkRequestPending = true;
-
-        Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Esperando 1er Chunk...");
+        Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Listo para solicitar 1er chunk...");
     } else {
         Logger::logINFO("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
     }
@@ -942,14 +940,13 @@ void Controller::onAutoRunningCommand(const char* rawCommand) {
     }
 
     if (!enqueueAutoPoint(parsedCmd)) {
-        Logger::logERROR("AUTO_RUNNING: FIFO llena. Punto descartado.");
+        Logger::logERROR("AUTO_RUNNING: FIFO llena. Punto descartado. Revisa chunk_size");
         return;
     }
 
-    // Al llegar datos nuevos dejamos de considerar pendiente el pedido anterior.
-    // SOLO liberar la bandera de petición si la cola de memoria ya se recuperó.
-    // Esto evita enviar multiples REQ_CHUNK mientras se recibe el paquete.
-    if (_chunkRequestPending && (_autoFifoCount > (AUTO_FIFO_CAPACITY / 2))) {
+    // Solo liberamos el candado de pedicion cuando el nivel de la FIFO haya subido lo suficiente
+    // como para no volver a caer instantaneamente a la zona de peligro
+    if (_chunkRequestPending && (_autoFifoCount >= 24)) {
     	_chunkRequestPending = false;
     }
 }
