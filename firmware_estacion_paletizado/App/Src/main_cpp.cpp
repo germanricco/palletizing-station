@@ -32,12 +32,37 @@ Joystick joystick_izquierdo(&buffer_global_adc[0], &buffer_global_adc[1],
                             Config::JOYSTICK_IZQUIERDO_Y_CENTER,
                             Config::JOYSTICK_DEADZONE);
 
-// Servo
+Joystick joystick_derecho(&buffer_global_adc[2], &buffer_global_adc[3],
+                          GPIOB, GPIO_PIN_6,
+                          Config::JOYSTICK_DERECHO_X_CENTER,
+                          Config::JOYSTICK_DERECHO_Y_CENTER,
+                          Config::JOYSTICK_DEADZONE);
+
+// Servos
 Servo servo_base(&TIM3->CCR1,
                  Config::SERVO_BASE_MIN_ANGLE,
                  Config::SERVO_BASE_MAX_ANGLE,
+                 Config::SERVO_BASE_MIN_PULSE_US,
+                 Config::SERVO_BASE_MAX_PULSE_US,
                  Config::SERVO_BASE_HOME_ANGLE,
                  Config::SERVO_BASE_MAX_SPEED);
+
+Servo servo_hombro(&TIM3->CCR2,
+				 Config::SERVO_HOMBRO_MIN_ANGLE,
+		         Config::SERVO_HOMBRO_MAX_ANGLE,
+		         Config::SERVO_HOMBRO_MIN_PULSE_US,
+		         Config::SERVO_HOMBRO_MAX_PULSE_US,
+		         Config::SERVO_HOMBRO_HOME_ANGLE,
+		         Config::SERVO_HOMBRO_MAX_SPEED);
+
+Servo servo_codo(&TIM3->CCR3,
+				 Config::SERVO_CODO_MIN_ANGLE,
+		         Config::SERVO_CODO_MAX_ANGLE,
+                 Config::SERVO_CODO_MIN_PULSE_US,
+                 Config::SERVO_CODO_MAX_PULSE_US,
+		         Config::SERVO_CODO_HOME_ANGLE,
+		         Config::SERVO_CODO_MAX_SPEED);
+
 
 // MotorDC
 MotorDC motor_cinta(&TIM2->CCR3, 49, 0);
@@ -52,7 +77,10 @@ Actuador efector_final(&TIM2->CCR1, &TIM2->CCR2, 49, 800);
 TerminalSerial terminal(&huart1);
 
 // Controlador
-Station::Controller stationController(terminal, joystick_izquierdo, servo_base, efector_final);
+Station::Controller stationController(terminal,
+									joystick_izquierdo, joystick_derecho,
+									servo_base, servo_hombro, servo_codo,
+									efector_final);
 
 
 // ==== INICIALIZACION DEL SISTEMA ====
@@ -64,13 +92,18 @@ void Cpp_Main_Init(void) {
     Logger::init(&terminal, Config::DEFAULT_LOG_LEVEL);
     Logger::logINFO("Inicializando sistema...");
 
-    // ADC
+    // ADCs
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)buffer_global_adc, 4);
     __HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_TC | DMA_IT_HT | DMA_IT_TE);
 
-    // Servo
+    // Servos
     servo_base.init();
+    servo_hombro.init();
+    servo_codo.init();
+
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
     HAL_TIM_Base_Start_IT(&htim3);
 
     // Actuador
@@ -98,6 +131,8 @@ void Cpp_Main_Init(void) {
 void Cpp_Main_Loop(void) {
 	// Actualizacion de entradas
     joystick_izquierdo.Actualizar();
+    joystick_derecho.Actualizar();
+
     terminal.update();
 
     const uint32_t tiempo_actual = HAL_GetTick();
@@ -121,42 +156,43 @@ void Cpp_Main_Loop(void) {
      * RUTINA DE PRUEBA: PERFIL DE VELOCIDAD MOTOR CINTA
      */
     // Ciclo de prueba de 12000 ms (12 segundos)
-   uint32_t tiempo_ciclo = tiempo_actual % 12000;
-   float velocidad_prueba = 0.0f;
+    /*uint32_t tiempo_ciclo = tiempo_actual % 12000;
+    float velocidad_prueba = 0.0f;
 
-   if (tiempo_ciclo < 2000) {
+    if (tiempo_ciclo < 2000) {
    	// Fase 1: Reposo (0 a 2 seg)
-       velocidad_prueba = 0.0f;
-   }
-   else if (tiempo_ciclo < 5000) {
-       // Fase 2: Aceleración Lineal (2 a 5 seg)
-       // Mapea el tiempo de (2000 a 5000) al rango de velocidad (0.0 a 1.0)
-       velocidad_prueba = static_cast<float>(tiempo_ciclo - 2000) / 3000.0f;
-   }
-   else if (tiempo_ciclo < 8000) {
-       // Fase 3: Mantenimiento Velocidad Máxima (5 a 8 seg)
-       velocidad_prueba = 1.0f;
-   }
-   else if (tiempo_ciclo < 11000) {
-       // Fase 4: Desaceleración Lineal (8 a 11 seg)
-       // Mapea el tiempo de (8000 a 11000) al rango de velocidad (1.0 a 0.0)
-       velocidad_prueba = 1.0f - (static_cast<float>(tiempo_ciclo - 8000) / 3000.0f);
-   }
-   else {
-       // Fase 5: Reposo de estabilización (11 a 12 seg)
-       velocidad_prueba = 0.0f;
-   }
+    	velocidad_prueba = 0.0f;
+    }
+    else if (tiempo_ciclo < 5000) {
+        // Fase 2: Aceleración Lineal (2 a 5 seg)
+        // Mapea el tiempo de (2000 a 5000) al rango de velocidad (0.0 a 1.0)
+        velocidad_prueba = static_cast<float>(tiempo_ciclo - 2000) / 3000.0f;
+    }
+    else if (tiempo_ciclo < 8000) {
+        // Fase 3: Mantenimiento Velocidad Máxima (5 a 8 seg)
+        velocidad_prueba = 1.0f;
+    }
+    else if (tiempo_ciclo < 11000) {
+        // Fase 4: Desaceleración Lineal (8 a 11 seg)
+        // Mapea el tiempo de (8000 a 11000) al rango de velocidad (1.0 a 0.0)
+        velocidad_prueba = 1.0f - (static_cast<float>(tiempo_ciclo - 8000) / 3000.0f);
+    }
+    else {
+        // Fase 5: Reposo de estabilización (11 a 12 seg)
+        velocidad_prueba = 0.0f;
+    }
 
-   // Inyección de la velocidad calculada al motor
-   //motor_cinta.setSpeed(velocidad_prueba);
-   float velocidad_motor_cinta = velocidad_prueba;
+    // Inyección de la velocidad calculada al motor
+    //motor_cinta.setSpeed(velocidad_prueba);
+    float velocidad_motor_cinta = velocidad_prueba;
 
     if (sensor_fin_cinta.objetoDetectado())
     {
         velocidad_motor_cinta = 0.0f;
     }
 
-    motor_cinta.setSpeed(velocidad_motor_cinta);
+    motor_cinta.setSpeed(velocidad_motor_cinta);*/
+    // ===================================================================================
 
     stationController.update(tiempo_actual);
 
@@ -177,6 +213,8 @@ void Cpp_Main_Loop(void) {
 extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     if (htim->Instance == TIM3) {
         servo_base.update();
+        servo_hombro.update();
+        servo_codo.update();
     }
 }
 
@@ -186,6 +224,11 @@ extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     if (GPIO_Pin == GPIO_PIN_5)
     {
         joystick_izquierdo.NotificarInterrupcion(GPIO_Pin);
+    }
+
+    if (GPIO_Pin == GPIO_PIN_6)
+    {
+        joystick_derecho.NotificarInterrupcion(GPIO_Pin);
     }
 
     if (sensor_fin_cinta.pinCoincide(GPIO_Pin))

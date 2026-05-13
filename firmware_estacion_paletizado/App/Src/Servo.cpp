@@ -10,24 +10,25 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
-Servo::Servo(volatile uint32_t* ccr_register, float minAngle, float maxAngle,
+Servo::Servo(volatile uint32_t* ccr_register,
+		float minAngle, float maxAngle,
+		float minPulseUs, float maxPulseUs,
 		float homeAngle, float maxSpeed)
     : _ccr_reg(ccr_register),
-	  _controlMode(ServoControlMode::SmoothPosition) {
+	  _minAngle(minAngle),
+	  _controlMode(ServoControlMode::SmoothPosition)
+{
+	// Cálculo de la pendiente de interpolación lineal
+    _angleToPulseFactor = (maxPulseUs - minPulseUs) / (maxAngle - minAngle);
 
-	// Interpolación lineal absoluta a microsegundos [180 grados = span de 2000us]
-	// Pulse(angle) = theta*(2500-500)/(180-0) + 500 = theta * 11.11... + 500
-	// Ej. si minAngle = 90.0f -> minPulseFloat = 1500.0f
-	float minPulseFloat = (minAngle * 11.111111f) + 500.0f;
-	float maxPulseFloat = (maxAngle * 11.111111f) + 500.0f;
-	float homePulseFloat = (homeAngle * 11.111111f) + 500.0f;
+	// Mapeo inicial
+    float homePulseFloat = minPulseUs + (homeAngle - minAngle) * _angleToPulseFactor;
 
 	// Escalamiento a Punto Fijo Q16.16
-	// Realizamos desplazamiento de 16bits a la izquierda multiplicando por 2^16
-	_minPulse_Q16 = static_cast<int32_t>(minPulseFloat * 65536.0f);
-	_maxPulse_Q16 = static_cast<int32_t>(maxPulseFloat * 65536.0f);
-	_homePulse_Q16 = static_cast<int32_t>(homePulseFloat * 65536.0f);
-	_maxSpeed_Q16 = static_cast<int32_t>(maxSpeed * 65536.0f);
+    _minPulse_Q16 = static_cast<int32_t>(minPulseUs * Q16_FACTOR);
+    _maxPulse_Q16 = static_cast<int32_t>(maxPulseUs * Q16_FACTOR);
+    _homePulse_Q16 = static_cast<int32_t>(homePulseFloat * Q16_FACTOR);
+    _maxSpeed_Q16 = static_cast<int32_t>(maxSpeed * Q16_FACTOR);
 
 	// Configuracion parametrica de la inercia del software
 	_acceleration_Q16 = _maxSpeed_Q16 / 10;
@@ -39,20 +40,17 @@ Servo::Servo(volatile uint32_t* ccr_register, float minAngle, float maxAngle,
 	_currentVelocity_Q16 = 0;
 }
 
-void Servo::init() {
-	_targetVelocity_Q16 = 0;
-	_currentVelocity_Q16 = 0;
-	_currentCCR_Q16 = _homePulse_Q16;
-	_targetPulse_Q16 = _homePulse_Q16;
-	_controlMode = ServoControlMode::SmoothPosition;
+int32_t Servo::convertAngleToPulseQ16(float angleDegrees) const {
+    // Reconstrucción del pulso base minPulseUs implícito en la ecuación
+    float minPulseUs = static_cast<float>(_minPulse_Q16) / Q16_FACTOR;
+    float pulseUs = minPulseUs + (angleDegrees - _minAngle) * _angleToPulseFactor;
+    return static_cast<int32_t>(pulseUs * Q16_FACTOR);
+}
 
-	// Barrera de hardware (Hard Fault)
+void Servo::init() {
+    goHome();
     if (_ccr_reg != nullptr) {
-    	// Desplazamiento al hardware
-    	// Se fuerza la interpretacion del bloque de memoria como entero
-    	// para que >> se compile como desplazamiento logico
-    	// +32768U para hacer redonedo (sumar 0.5 y luego truncar)
-    	*_ccr_reg = (static_cast<uint32_t>(_homePulse_Q16) + 32768U) >> 16;
+        *_ccr_reg = (static_cast<uint32_t>(_homePulse_Q16) + Q16_HALF_STEP) >> 16;
     }
 }
 
@@ -65,10 +63,10 @@ void Servo::goHome(){
 	_currentVelocity_Q16 = 0;
 }
 
-void Servo::commandVelocity(float normalizedVelocity) {
+void Servo::setTargetVelocity(float normalizedVelocity) {
 	_controlMode = ServoControlMode::Velocity;
 
-	// Saturación de la entrada para evitar desbordamientos de intención direccional
+	// Saturación de la entrada
 	if (normalizedVelocity > 1.0f) normalizedVelocity = 1.0f;
 	else if (normalizedVelocity < -1.0f) normalizedVelocity = -1.0f;
 
@@ -84,45 +82,38 @@ void Servo::commandVelocity(float normalizedVelocity) {
     _targetVelocity_Q16 = static_cast<int32_t>(normalizedVelocity * static_cast<float>(_maxSpeed_Q16));
 }
 
-void Servo::commandSmoothPosition(float angleDegrees) {
+void Servo::setSmoothTargetPosition(float angleDegrees) {
     _controlMode = ServoControlMode::SmoothPosition;
 
     // Purgado de Inercias
     _targetVelocity_Q16 = 0;
     _currentVelocity_Q16 = 0;
 
-    // Conversion a microsegundos en punto flotante
-    float targetPulseFloat = (angleDegrees * 11.111111f) + 500.0f;
-    int64_t target_Intermediate = static_cast<int64_t>(targetPulseFloat * 65536.0f);
+    int64_t target_Intermediate = convertAngleToPulseQ16(angleDegrees);
 
-    // Saturación preventiva contra colisiones antes de iniciar el desplazamiento
-    if (target_Intermediate > static_cast<int64_t>(_maxPulse_Q16)) {
-        _targetPulse_Q16 = _maxPulse_Q16;
-    } else if (target_Intermediate < static_cast<int64_t>(_minPulse_Q16)) {
-        _targetPulse_Q16 = _minPulse_Q16;
-    } else {
-        _targetPulse_Q16 = static_cast<int32_t>(target_Intermediate);
-    }
+    // Saturación preventiva de posicion objetivo
+    if (target_Intermediate > _maxPulse_Q16) _targetPulse_Q16 = _maxPulse_Q16;
+    else if (target_Intermediate < _minPulse_Q16) _targetPulse_Q16 = _minPulse_Q16;
+    else _targetPulse_Q16 = static_cast<int32_t>(target_Intermediate);
 }
 
-void Servo::commandDirectPosition(float angleDegrees) {
+void Servo::setDirectTargetPosition(float angleDegrees) {
     _controlMode = ServoControlMode::DirectPosition;
 
     // Purgado de inercias
     _targetVelocity_Q16 = 0;
     _currentVelocity_Q16 = 0;
 
-    float targetPulseFloat = (angleDegrees * 11.111111f) + 500.0f;
-    int64_t target_Intermediate = static_cast<int64_t>(targetPulseFloat * 65536.0f);
+    int64_t target_Intermediate = convertAngleToPulseQ16(angleDegrees);
 
-    // Inyección directa a la variable de estado (ZOH transparente)
-    if (target_Intermediate > static_cast<int64_t>(_maxPulse_Q16)) {
-        _currentCCR_Q16 = _maxPulse_Q16;
-    } else if (target_Intermediate < static_cast<int64_t>(_minPulse_Q16)) {
-        _currentCCR_Q16 = _minPulse_Q16;
-    } else {
-        _currentCCR_Q16 = static_cast<int32_t>(target_Intermediate);
-    }
+    int32_t valid_target;
+    if (target_Intermediate > _maxPulse_Q16) valid_target = _maxPulse_Q16;
+    else if (target_Intermediate < _minPulse_Q16) valid_target = _minPulse_Q16;
+    else valid_target = static_cast<int32_t>(target_Intermediate);
+    
+    // Se actualiza la posicion actual y la consigna
+    _currentCCR_Q16 = valid_target;
+    _targetPulse_Q16 = valid_target;
 }
 
 void Servo::update() {
@@ -132,74 +123,145 @@ void Servo::update() {
 	}
 
 	// Resolucion de la maquina de estados
-	if (_controlMode == ServoControlMode::Velocity){
-		// Limitador de tasa de giro (Slew Rate Limiter)
-		if (_currentVelocity_Q16 < _targetVelocity_Q16) {
-			// Aumento la velocidad
-			_currentVelocity_Q16 += _acceleration_Q16;
-			// Valido que esta nueva velocidad no supere el target
-			if (_currentVelocity_Q16 > _targetVelocity_Q16) _currentVelocity_Q16 = _targetVelocity_Q16;
-		} else if (_currentVelocity_Q16 > _targetVelocity_Q16) {
-		    _currentVelocity_Q16 -= _acceleration_Q16;
-		    if (_currentVelocity_Q16 < _targetVelocity_Q16) _currentVelocity_Q16 = _targetVelocity_Q16;
-		}
+	if (_controlMode == ServoControlMode::Velocity) {
+        // Prediccion de Colision (Soft Limits Direccionales)
+        int32_t absVelocity_Q16 = (_currentVelocity_Q16 < 0) ? -_currentVelocity_Q16 : _currentVelocity_Q16;
+        
+        int32_t steps_to_stop = (absVelocity_Q16 + _acceleration_Q16 - 1) / _acceleration_Q16;
+        int32_t braking_distance_Q16 = (steps_to_stop * absVelocity_Q16 + absVelocity_Q16) / 2;
 
-		_currentCCR_Q16 += _currentVelocity_Q16;
+        int32_t dist_to_max = _maxPulse_Q16 - _currentCCR_Q16;
+        int32_t dist_to_min = _currentCCR_Q16 - _minPulse_Q16;
 
-	} else if (_controlMode == ServoControlMode::SmoothPosition) {
-		int32_t error_Q16 = _targetPulse_Q16 - _currentCCR_Q16;
-	    int32_t absError_Q16 = (error_Q16 < 0) ? -error_Q16 : error_Q16;
+        int32_t safe_target_velocity = _targetVelocity_Q16;
 
-	    // Banda muerta (Deadband) de 0.5 us para eliminar micro-oscilaciones asintóticas
-        if (absError_Q16 <= 32768) {
-            _currentCCR_Q16 = _targetPulse_Q16;
-        } else {
-            // Desaceleración Proporcional: Se acerca suavemente al objetivo (/8 actúa como Kp)
-            int32_t step = error_Q16 / 8;
-
-            if (step > _maxSpeed_Q16) step = _maxSpeed_Q16;
-            else if (step < -_maxSpeed_Q16) step = -_maxSpeed_Q16;
-
-            // Garantizar un paso mínimo para no estancarse antes de la banda muerta
-            if (step == 0) step = (error_Q16 > 0) ? 13107 : -13107; // ~0.2 us de empuje residual
-
-            _currentCCR_Q16 += step;
+        // Override Direccional: 
+        // Solo forzamos a 0 si la intención del usuario empuja HACIA el límite
+        if (_currentVelocity_Q16 > 0 && dist_to_max <= braking_distance_Q16) {
+            if (safe_target_velocity > 0) {
+                safe_target_velocity = 0; 
+            }
+        } else if (_currentVelocity_Q16 < 0 && dist_to_min <= braking_distance_Q16) {
+            if (safe_target_velocity < 0) {
+                safe_target_velocity = 0; 
+            }
         }
-    } else if (_controlMode == ServoControlMode::DirectPosition) {
-    	//
+
+        // Rampa de Velocidad Cinematica (Slew Rate Limiter)
+        if (_currentVelocity_Q16 < safe_target_velocity) {
+            _currentVelocity_Q16 += _acceleration_Q16;
+            if (_currentVelocity_Q16 > safe_target_velocity) _currentVelocity_Q16 = safe_target_velocity;
+        } else if (_currentVelocity_Q16 > safe_target_velocity) {
+            _currentVelocity_Q16 -= _acceleration_Q16;
+            if (_currentVelocity_Q16 < safe_target_velocity) _currentVelocity_Q16 = safe_target_velocity;
+        }
+
+        // Actualizacion de Estado (Con Hard Clamp)
+        int64_t next_ccr = static_cast<int64_t>(_currentCCR_Q16) + _currentVelocity_Q16;
+
+        // El Hard Clamp es vital para evitar desbordes en caso de comandos extremos
+        if (next_ccr > _maxPulse_Q16) {
+            _currentCCR_Q16 = _maxPulse_Q16;
+            _currentVelocity_Q16 = 0; // Purgamos la inercia instantáneamente
+        } else if (next_ccr < _minPulse_Q16) {
+            _currentCCR_Q16 = _minPulse_Q16;
+            _currentVelocity_Q16 = 0;
+        } else {
+            _currentCCR_Q16 = static_cast<int32_t>(next_ccr);
+        }
+        
+        // Sincronizamos el target de posición para mantener la consistencia del estado
+        _targetPulse_Q16 = _currentCCR_Q16; 
+
+    } else if (_controlMode == ServoControlMode::SmoothPosition) {
+        int32_t error_Q16 = _targetPulse_Q16 - _currentCCR_Q16;
+        int32_t absError_Q16 = (error_Q16 < 0) ? -error_Q16 : error_Q16;
+
+        if (absError_Q16 <= DEADBAND_Q16) {
+            _currentCCR_Q16 = _targetPulse_Q16;
+            _currentVelocity_Q16 = 0; // Detención total
+        } else {
+            // Cinemática Predictiva (Perfil Trapezoidal Simétrico)
+            int32_t absVelocity_Q16 = (_currentVelocity_Q16 < 0) ? -_currentVelocity_Q16 : _currentVelocity_Q16;
+
+            // Calculo de frenado. Redondeo hacia arriba para asegurar que siempre se frene a tiempo
+            int32_t steps_to_stop = (absVelocity_Q16 + _acceleration_Q16 - 1) / _acceleration_Q16;
+            
+            // Suma aritmetica escalonada
+            int32_t braking_distance_Q16 = (steps_to_stop * absVelocity_Q16 + absVelocity_Q16) / 2;
+
+            int32_t desired_velocity = 0;
+
+            // Lógica de Navegación Bang-Bang
+            if (absError_Q16 <= braking_distance_Q16) {
+                // Entramos a zona de frenado, ordenamos detenernos
+                desired_velocity = 0; 
+            } else {
+                // Aceleracion a velocidad constante
+                desired_velocity = (error_Q16 > 0) ? _maxSpeed_Q16 : -_maxSpeed_Q16;
+            }
+
+            // Zona de Aterrizaje suave (Anti-Chattering)
+            // Actua como controlador P/4 que actua solo si la velocidad 
+            // pedida por el Bang-Bang nos haria pasarnos del objetivo.
+            int32_t safe_velocity = error_Q16 / 4;
+
+            // Aplicamos el límite seguro manteniendo la intención direccional
+            if (desired_velocity > 0 && desired_velocity > safe_velocity && safe_velocity > 0) {
+                desired_velocity = safe_velocity;
+            } else if (desired_velocity < 0 && desired_velocity < safe_velocity && safe_velocity < 0) {
+                desired_velocity = safe_velocity;
+            }
+
+            // Slew Rate Limiter (Forzamos aceleración y deceleración constantes y simétricas)
+            if (desired_velocity > _currentVelocity_Q16 + _acceleration_Q16) {
+                _currentVelocity_Q16 += _acceleration_Q16;
+            } else if (desired_velocity < _currentVelocity_Q16 - _acceleration_Q16) {
+                _currentVelocity_Q16 -= _acceleration_Q16;
+            } else {
+                _currentVelocity_Q16 = desired_velocity;
+            }
+
+            // Empuje residual para vencer friccion estatica (Deadband)
+            if (_currentVelocity_Q16 == 0 && desired_velocity != 0) {
+                 _currentVelocity_Q16 = (error_Q16 > 0) ? 13107 : -13107; 
+            }
+
+            _currentCCR_Q16 += _currentVelocity_Q16;
+        }
     }
 
-	// Recorte estricto para cumplir limites mecanicos
-	if (_currentCCR_Q16 > _maxPulse_Q16) {
-		_currentCCR_Q16 = _maxPulse_Q16;
-	} else if (_currentCCR_Q16 < _minPulse_Q16) {
-	    _currentCCR_Q16 = _minPulse_Q16;
-	}
+    // Recorte estricto para cumplir limites mecanicos
+    if (_currentCCR_Q16 > _maxPulse_Q16) {
+        _currentCCR_Q16 = _maxPulse_Q16;
+        _currentVelocity_Q16 = 0;
+    }
+    else if (_currentCCR_Q16 < _minPulse_Q16) {
+        _currentCCR_Q16 = _minPulse_Q16;
+        _currentVelocity_Q16 = 0;
+    }
 
-	// Ejecucion en registro con compensacion de sesgo de truncamiento
-	// 1. Casting a Unsigned: Garantiza desplazamiento lógico y no aritmético por el compilador.
-	// 2. Suma de +32768U: Equivale a +0.5 en notación de coma flotante (Redondeo geométrico).
-	// 3. Shift >> 16: Desescala Q16.16 devolviendo la magnitud entera de microsegundos al registro.
-	uint32_t ccr_unsigned = static_cast<uint32_t>(_currentCCR_Q16);
-	*_ccr_reg = (ccr_unsigned + 32768U) >> 16;
+    // Ejecucion en registro hardware
+    uint32_t ccr_unsigned = static_cast<uint32_t>(_currentCCR_Q16);
+    *_ccr_reg = (ccr_unsigned + Q16_HALF_STEP) >> 16;
 }
 
 void Servo::setMaxSpeed(float newMaxSpeed) {
     if (newMaxSpeed > 0.01f) {
-    	_maxSpeed_Q16 = static_cast<int32_t>(newMaxSpeed * 65536.0f);
+    	_maxSpeed_Q16 = static_cast<int32_t>(newMaxSpeed * Q16_FACTOR);
     	_acceleration_Q16 = _maxSpeed_Q16 / 10;
     }
 }
 
 float Servo::getAngleDegrees() const {
-	float ccr_float = static_cast<float>(_currentCCR_Q16) / 65536.0f;
-	return (ccr_float - 500.0f) * 0.09f;
+	float minPulseUs = static_cast<float>(_minPulse_Q16) / Q16_FACTOR;
+    float currentPulseUs = static_cast<float>(_currentCCR_Q16) / Q16_FACTOR;
+    return _minAngle + (currentPulseUs - minPulseUs) / _angleToPulseFactor;
 }
 
 float Servo::getAngleRadians() const {
 	// (PI / Rango) * (ValorActual - DesplazamientoMinimo
-	float ccr_float = static_cast<float>(_currentCCR_Q16) / 65536.0f;
-	return (ccr_float - 500.0f) * (M_PI / 2000.0f);
+	return getAngleDegrees() * (M_PI / 180.0f);
 }
 
 bool Servo::isTargetReached() const {
@@ -211,5 +273,5 @@ bool Servo::isTargetReached() const {
     int32_t absError_Q16 = (error_Q16 < 0) ? -error_Q16 : error_Q16;
 
     // Si el error es menor o igual a la banda muerta (0.5 us), llegamos.
-    return (absError_Q16 <= 32768);
+    return (absError_Q16 <= DEADBAND_Q16);
 }

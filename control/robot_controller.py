@@ -234,12 +234,15 @@ class RobotController:
                     float(is_actuator_on)
                 ])
 
+            # Conversion de Radianes a Grados para la UI
+            joints_degrees = np.rad2deg(kin_array).tolist()
+
             # Propagacion de telemetria hacia la UI (Observer Pattern)
             if self.ui_update_callback is not None:
                 # Se asume que callback implementa mecanismos de Thread-Safe
                 self.ui_update_callback(
                     self.robot.get_cartesian_state(),
-                    kin_array.tolist(),
+                    joints_degrees,
                     self.current_state,
                     self.actuator_active
                 )
@@ -751,11 +754,15 @@ class RobotController:
 
                 self.robot.update_state(q1, q2, q3)
 
+                # Conversion a grados para la UI
+                joints_rad = np.array([q1, q2, q3], dtype=np.float32)
+                joints_degrees = np.rad2deg(joints_rad).tolist()
+
                 # Notificamos a la UI inyectando las posiciones simuladas
                 if self.ui_update_callback:
                     self.ui_update_callback(
                         self.robot.get_cartesian_state(),
-                        [q1, q2, q3],
+                        joints_degrees,
                         self.current_state,
                         is_actuator_on,
                         progress

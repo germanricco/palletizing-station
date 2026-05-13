@@ -99,8 +99,8 @@ public:
 	 * @param efectorFinal Controlador del circuito neumático (Bomba y Válvula).
 	 */
     Controller(TerminalSerial& terminal,
-               Joystick& joystickIzquierdo,
-               Servo& servoBase,
+               Joystick& joystickIzquierdo, Joystick& joystickDerecho,
+               Servo& servoBase, Servo& servoHombro, Servo& servoCodo,
 			   Actuador& efectorFinal);
 
     /**
@@ -131,8 +131,14 @@ public:
 private:
     // --- Dependencias Fisicas Inyectadas ---
     TerminalSerial& _terminal;
+
     Joystick& _joystickIzquierdo;
+    Joystick& _joystickDerecho;
+
     Servo& _servoBase;
+    Servo& _servoHombro;
+    Servo& _servoCodo;
+
     Actuador& _efectorFinal;
 
     // --- Variables de Estado Interno del Controlador ---

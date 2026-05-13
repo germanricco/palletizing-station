@@ -56,12 +56,15 @@ namespace Station {
 
 // CONSTRUCTOR
 Controller::Controller(TerminalSerial& terminal,
-                       Joystick& joystickIzquierdo,
-                       Servo& servoBase,
+                       Joystick& joystickIzquierdo,	Joystick& joystickDerecho,
+                       Servo& servoBase, Servo& servoHombro, Servo& servoCodo,
 					   Actuador& efectorFinal)
     : _terminal(terminal),
       _joystickIzquierdo(joystickIzquierdo),
+	  _joystickDerecho(joystickDerecho),
       _servoBase(servoBase),
+	  _servoHombro(servoHombro),
+	  _servoCodo(servoCodo),
 	  _efectorFinal(efectorFinal),
       _state(GlobalState::Boot),
       _previousState(GlobalState::Boot),
@@ -105,7 +108,7 @@ void Controller::update(uint32_t nowMs) {
     if (_efectorFinal.getState() == ActuatorState::Suction) {
     	if ((nowMs - _tiempoInicioSuccion) >= 2000U ) {
     		_efectorFinal.commandHold(0.1f);
-    		Logger::logINFO("Actuador: Vacio asegurado. Pasando a Holding");
+    		Logger::logDEBUG("Actuador: Vacio asegurado. Pasando a Holding");
     	}
     }
 
@@ -309,10 +312,11 @@ void Controller::requestNextChunkIfNeeded(void) {
     if (_autoFifoCount >= 16) return;
     if (_chunkRequestPending) return;
 
-    Logger::logINFO("AUTO_RUNNING: FIFO baja. Enviado REQ_CHUNK.");
+    Logger::logDEBUG("AUTO_RUNNING: FIFO baja. Enviado REQ_CHUNK.");
     _terminal.enviarNormal("REQ_CHUNK\r\n");
     _chunkRequestPending = true;
 }
+
 
 void Controller::gestionarActuadorAuto(uint8_t a1, uint32_t nowMs) {
     if (a1 == 1) {
@@ -321,14 +325,14 @@ void Controller::gestionarActuadorAuto(uint8_t a1, uint32_t nowMs) {
 
             _efectorFinal.commandSuction(1.0f);
             _tiempoInicioSuccion = nowMs; // Correccion Bug: Timeout de vacio
-            Logger::logINFO("ACTUADOR: Iniciando Succion (Auto)");
+            Logger::logDEBUG("ACTUADOR: Iniciando Succion (Auto)");
         }
     } else {
         if (_efectorFinal.getState() != ActuatorState::Idle &&
             _efectorFinal.getState() != ActuatorState::Releasing) {
 
             _efectorFinal.commandRelease();
-            Logger::logINFO("ACTUADOR: Liberando pieza (Auto)");
+            Logger::logDEBUG("ACTUADOR: Liberando pieza (Auto)");
         }
     }
 }
@@ -568,7 +572,9 @@ void Controller::processStateLocalCommand(const char* rawLine) {
 
 // FUNCIONES AUXILIARES DE LA ESTACIÓN
 void Controller::detenerActuadoresManuales(void) {
-    _servoBase.commandVelocity(0.0f);
+    _servoBase.setTargetVelocity(0.0f);
+    _servoHombro.setTargetVelocity(0.0f);
+    _servoCodo.setTargetVelocity(0.0f);
 }
 
 void Controller::realizarServoInitInicial(void) {
@@ -577,6 +583,8 @@ void Controller::realizarServoInitInicial(void) {
 
 void Controller::realizarGoHomeNormal(void) {
     _servoBase.goHome();
+    _servoHombro.goHome();
+    _servoCodo.goHome();
 }
 
 void Controller::enviarTelemetria(void) {
@@ -585,8 +593,8 @@ void Controller::enviarTelemetria(void) {
 
     // Estado de Servos
     const float j1_rad = _servoBase.getAngleRadians();
-    const float j2_rad = 1.20f;   // TODO: integrar servo 2
-    const float j3_rad = -2.00f;  // TODO: integrar servo 3
+    const float j2_rad = _servoHombro.getAngleRadians();
+    const float j3_rad = _servoCodo.getAngleRadians();
 
     // Estado de Actuador
     int a1 = 0;
@@ -613,11 +621,13 @@ void Controller::enviarEstadoActualPorUart(void) {
 
 void Controller::procesarTeleoperacion(void) {
     // 1. Actualizar Motores pasando comando de velocidad
-    _servoBase.commandVelocity(_joystickIzquierdo.ObtenerX());
+    _servoBase.setTargetVelocity(_joystickIzquierdo.ObtenerX());
+    _servoHombro.setTargetVelocity(_joystickIzquierdo.ObtenerY());
+    _servoCodo.setTargetVelocity(_joystickDerecho.ObtenerY());
 
     // 2. Actualizar Actuador si hay pulsación
-    if (_joystickIzquierdo.HayPulsacionValida()) {
-        Logger::logINFO("TELEOPERACION: pulsador izq accionado.");
+    if (_joystickDerecho.HayPulsacionValida()) {
+        Logger::logDEBUG("TELEOPERACION: pulsador derecho accionado.");
         HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1); // Feedback visual
 
         ActuatorState estadoActuador = _efectorFinal.getState();
@@ -625,10 +635,10 @@ void Controller::procesarTeleoperacion(void) {
         if (estadoActuador == ActuatorState::Idle || estadoActuador == ActuatorState::Releasing) {
             _efectorFinal.commandSuction(1.0f);
             _tiempoInicioSuccion = HAL_GetTick(); // Registramos el inicio
-            Logger::logINFO("ACTUADOR: Iniciando Succion (100% PWM).");
+            Logger::logDEBUG("ACTUADOR: Iniciando Succion (100% PWM).");
         } else {
             _efectorFinal.commandRelease();
-            Logger::logINFO("ACTUADOR: Liberando pieza.");
+            Logger::logDEBUG("ACTUADOR: Liberando pieza.");
         }
     }
 }
@@ -636,17 +646,17 @@ void Controller::procesarTeleoperacion(void) {
 
 // CALLBACKS DE ENTRADA A ESTADO
 void Controller::onEnterBoot(void) {
-    Logger::logINFO("FSM -> Boot");
+    Logger::logDEBUG("FSM -> Boot");
 }
 
 void Controller::onEnterInit(void) {
-    Logger::logINFO("FSM -> Init");
+    Logger::logDEBUG("FSM -> Init");
     detenerActuadoresManuales();
     clearAutoRuntimeState();
 }
 
 void Controller::onEnterIdle(void) {
-    Logger::logINFO("FSM -> Idle");
+    Logger::logDEBUG("FSM -> Idle");
     detenerActuadoresManuales();
     clearAutoRuntimeState();
 
@@ -659,22 +669,22 @@ void Controller::onEnterIdle(void) {
 }
 
 void Controller::onEnterManual(void) {
-    Logger::logINFO("FSM -> Manual");
+    Logger::logDEBUG("FSM -> Manual");
 }
 
 void Controller::onEnterRecording(void) {
-    Logger::logINFO("FSM -> Recording");
+    Logger::logDEBUG("FSM -> Recording");
     realizarGoHomeNormal();
 }
 
 void Controller::onEnterAutoReady(void) {
-    Logger::logINFO("FSM -> AutoReady");
+    Logger::logDEBUG("FSM -> AutoReady");
     detenerActuadoresManuales();
     clearAutoRuntimeState();
 }
 
 void Controller::onEnterAutoRunning(void) {
-    Logger::logINFO("FSM -> AutoRunning");
+    Logger::logDEBUG("FSM -> AutoRunning");
 
     /*
      * Al iniciar playback desde AutoReady queremos arrancar limpio.
@@ -683,15 +693,15 @@ void Controller::onEnterAutoRunning(void) {
     if (_previousState != GlobalState::AutoPaused) {
         clearAutoRuntimeState();
         _lastTrajectoryTick = HAL_GetTick(); // Inicia el reloj principal
-        Logger::logINFO("AUTO_RUNNING: FIFO inicializada. Listo para solicitar 1er chunk...");
+        Logger::logDEBUG("AUTO_RUNNING: FIFO inicializada. Listo para solicitar 1er chunk...");
     } else {
     	_lastTrajectoryTick = HAL_GetTick(); // Resincroniza el reloj al despausar
-        Logger::logINFO("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
+        Logger::logDEBUG("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
     }
 }
 
 void Controller::onEnterAutoPaused(void) {
-    Logger::logINFO("FSM -> AutoPaused");
+    Logger::logDEBUG("FSM -> AutoPaused");
     detenerActuadoresManuales();
 }
 
@@ -741,7 +751,12 @@ void Controller::onUpdateAutoRunning(void) {
         if (dequeueAutoPoint(currentPoint)) {
             // A. Cinemática
             float anguloGradosQ1 = currentPoint.q1 * 57.29578f;
-            _servoBase.commandDirectPosition(anguloGradosQ1);
+            float anguloGradosQ2 = currentPoint.q2 * 57.29578f;
+            float anguloGradosQ3 = currentPoint.q3 * 57.29578f;
+
+            _servoBase.setDirectTargetPosition(anguloGradosQ1);
+            _servoHombro.setDirectTargetPosition(anguloGradosQ2);
+            _servoCodo.setDirectTargetPosition(anguloGradosQ3);
 
             // B. Actuador (Corregido con timestamp)
             gestionarActuadorAuto(currentPoint.a1, nowMs);
@@ -762,17 +777,17 @@ void Controller::onUpdateEmergency(void) {}
 
 // CALLBACKS DE COMANDOS LOCALES
 void Controller::onManualCommand(const char* rawCommand) {
-    Logger::logINFO("CMD(MANUAL): %s", rawCommand);
+    Logger::logDEBUG("CMD(MANUAL): %s", rawCommand);
 }
 
 void Controller::onRecordingCommand(const char* rawCommand) {
-    Logger::logINFO("CMD(RECORDING): %s", rawCommand);
+    Logger::logDEBUG("CMD(RECORDING): %s", rawCommand);
 }
 
 void Controller::onAutoReadyCommand(const char* rawCommand) {
     PendingAutoCommand parsedCmd{};
     if (!tryParseGCommand(rawCommand, parsedCmd)) return;
-    Logger::logINFO("AUTO_READY: G ignorado. Primer chunk inicia despues de ACK_M112.");
+    Logger::logDEBUG("AUTO_READY: G ignorado. Primer chunk inicia despues de ACK_M112.");
 }
 
 void Controller::onAutoRunningCommand(const char* rawCommand) {
@@ -791,11 +806,11 @@ void Controller::onAutoRunningCommand(const char* rawCommand) {
 }
 
 void Controller::onAutoPausedCommand(const char* rawCommand) {
-    Logger::logINFO("CMD(AUTO_PAUSED): %s", rawCommand);
+    Logger::logDEBUG("CMD(AUTO_PAUSED): %s", rawCommand);
 }
 
 void Controller::onIdleCommand(const char* rawCommand) {
-    Logger::logINFO("CMD(IDLE): %s", rawCommand);
+    Logger::logDEBUG("CMD(IDLE): %s", rawCommand);
 }
 
 } // namespace Station

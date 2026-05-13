@@ -65,7 +65,10 @@ class RoboticArmMK2:
 
     # ==== CAPA DE ADAPTACION HARDWARE <-> MATEMATICA
     def servo_to_kinematic(self, q_servo: np.ndarray) -> np.ndarray:
-        """Traduce valores crudos de los servomotores al espacio matemático."""
+        """
+        Traduce valores crudos de los servomotores al espacio matemático.
+        q_servo en radianes
+        """
         return (q_servo * self.hw_dir) + self.hw_offset
 
     def kinematic_to_servo(self, q_kin: np.ndarray) -> np.ndarray:
