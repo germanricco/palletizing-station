@@ -17,7 +17,7 @@ class WireframeCanvas(FigureCanvasQTAgg):
     el brazo robótico de forma dinámica.
     """
 
-    def __init__(self, workspace_limits: tuple = (-200, 200, -100, 300, 0, 350)) -> None:
+    def __init__(self, workspace_limits: tuple = (-100, 300, -200, 200, 0, 350)) -> None:
         """
         Inicializa el canvas 3D y aplica el estilizado global de la GUI.
         
@@ -85,17 +85,32 @@ class WireframeCanvas(FigureCanvasQTAgg):
             [0.0,     0.0,  92.0],    # 2. J1  (Altura L1)
             [0.0,     0.0, 227.0],    # 3. J2  (Hombro vertical: L1 + L2 = 92 + 135)
             [0.0,   147.0, 227.0],    # 4. WP  (Codo extendido en X: L3 = 147)
-            [0.0,   122.0, 227.0]     # 5. TCP (Caída hacia la herramienta: WP_z - L4 = 227 - 25)
+            [0.0,   117.0, 227.0],    # 5. FLANGE (Caída hacia la herramienta: WP_z - L4 = 227 - 25)
+            [0.0,    87.0, 182.0]     # 6. Tool (Posición de la herramienta)
         ], dtype=np.float32)
 
         self.draw_robot(default_home_state)
 
     def _update_joints(self, frame_state: np.ndarray) -> None:
         """Actualiza memoria gráfica de nodos y TCP."""
-        # Articulaciones (0 a 4)
-        X_joints, Y_joints, Z_joints = frame_state[:5, 0], frame_state[:5, 1], frame_state[:5, 2]
+        # ARTICULACIONES Y BRIDAS (Todos los nodos EXCEPTO el último)
+        # Al usar [:-1], nos aseguramos de que los puntos blancos lleguen
+        # exactamente hasta el Flange/WP, sin importar el tamaño de la matriz.
+        X_joints = frame_state[:-1, 0]
+        Y_joints = frame_state[:-1, 1]
+        Z_joints = frame_state[:-1, 2]
+        
         self.scatter_joints.set_data(X_joints, Y_joints)
         self.scatter_joints.set_3d_properties(Z_joints)
+
+        # TCP (Únicamente el ÚLTIMO nodo de la matriz)
+        # Al usar [-1:], extraemos dinámicamente la punta de la herramienta.
+        X_tcp = frame_state[-1:, 0]
+        Y_tcp = frame_state[-1:, 1]
+        Z_tcp = frame_state[-1:, 2]
+        
+        self.scatter_tcp.set_data(X_tcp, Y_tcp)
+        self.scatter_tcp.set_3d_properties(Z_tcp)
 
         # TCP (Índice 5)
         X_tcp, Y_tcp, Z_tcp = frame_state[5:6, 0], frame_state[5:6, 1], frame_state[5:6, 2]
@@ -104,7 +119,10 @@ class WireframeCanvas(FigureCanvasQTAgg):
 
     def _update_wireframe(self, frame_state: np.ndarray) -> None:
         """Actualiza memoria gráfica de los eslabones."""
-        X_wire, Y_wire, Z_wire = frame_state[:, 0], frame_state[:, 1], frame_state[:, 2]
+        X_wire = frame_state[:, 0]
+        Y_wire = frame_state[:, 1]
+        Z_wire = frame_state[:, 2]
+        
         self.line_wireframe.set_data(X_wire, Y_wire)
         self.line_wireframe.set_3d_properties(Z_wire)
 
@@ -121,7 +139,7 @@ class WireframeCanvas(FigureCanvasQTAgg):
         else:
             frame_state = cartesian_state
 
-        if frame_state.shape != (6, 3):
+        if frame_state.shape != (7, 3):
             raise ValueError(f"Dimensión incorrecta. Se requiere (6, 3), recibido: {frame_state.shape}")
 
         self._update_wireframe(frame_state)

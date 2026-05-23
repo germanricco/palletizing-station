@@ -156,30 +156,23 @@ void Cpp_Main_Loop(void) {
      * RUTINA DE PRUEBA: PERFIL DE VELOCIDAD MOTOR CINTA
      */
     // Ciclo de prueba de 12000 ms (12 segundos)
-    /*uint32_t tiempo_ciclo = tiempo_actual % 12000;
+    uint32_t tiempo_ciclo = tiempo_actual % 12000;
     float velocidad_prueba = 0.0f;
 
-    if (tiempo_ciclo < 2000) {
-   	// Fase 1: Reposo (0 a 2 seg)
-    	velocidad_prueba = 0.0f;
-    }
-    else if (tiempo_ciclo < 5000) {
-        // Fase 2: Aceleración Lineal (2 a 5 seg)
-        // Mapea el tiempo de (2000 a 5000) al rango de velocidad (0.0 a 1.0)
-        velocidad_prueba = static_cast<float>(tiempo_ciclo - 2000) / 3000.0f;
-    }
-    else if (tiempo_ciclo < 8000) {
-        // Fase 3: Mantenimiento Velocidad Máxima (5 a 8 seg)
-        velocidad_prueba = 1.0f;
+    if (tiempo_ciclo < 1000) {
+    	// Fase 1: Aceleración Lineal (0 a 1 seg)
+        // Mapea el tiempo de (0 a 1000 ms) al rango de velocidad (0.0f a 0.5f)
+        velocidad_prueba = (static_cast<float>(tiempo_ciclo) / 1000.0f) * 0.25f;
     }
     else if (tiempo_ciclo < 11000) {
-        // Fase 4: Desaceleración Lineal (8 a 11 seg)
-        // Mapea el tiempo de (8000 a 11000) al rango de velocidad (1.0 a 0.0)
-        velocidad_prueba = 1.0f - (static_cast<float>(tiempo_ciclo - 8000) / 3000.0f);
+        // Fase 2: Mantenimiento de Velocidad (1 a 11 seg)
+        // Mantiene la velocidad constante durante 10 segundos
+        velocidad_prueba = 0.25f;
     }
     else {
-        // Fase 5: Reposo de estabilización (11 a 12 seg)
-        velocidad_prueba = 0.0f;
+        // Fase 3: Desaceleración Lineal (11 a 12 seg)
+        // Mapea el tiempo de (11000 a 12000 ms) para reducir la velocidad de 0.5f a 0.0f
+        velocidad_prueba = 0.25f - ((static_cast<float>(tiempo_ciclo - 11000) / 1000.0f) * 0.25f);
     }
 
     // Inyección de la velocidad calculada al motor
@@ -191,7 +184,7 @@ void Cpp_Main_Loop(void) {
         velocidad_motor_cinta = 0.0f;
     }
 
-    motor_cinta.setSpeed(velocidad_motor_cinta);*/
+    motor_cinta.setSpeed(velocidad_motor_cinta);
     // ===================================================================================
 
     stationController.update(tiempo_actual);

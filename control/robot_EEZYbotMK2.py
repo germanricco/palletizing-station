@@ -17,39 +17,51 @@ class RoboticArmMK2:
         self.logger.info("Inicializando Gemelo Digital EEZTbotARM MK2.")
 
         # Parametros Geometricos Fisicos
-        #! Obtenidos de Repositorio de Referencia.
         self.L1: float = 92.0       # MCS -> J1
         self.L2: float = 135.0      # J1 -> J2
         self.L3: float = 147.0      # J2 -> WP
-        self.L4: float = 25.0       # WP -> TCP (reestriccion de paralelogramo)
+        self.L4: float = 30.0       # WP -> TCP (reestriccion de paralelogramo)
+
+        # Dimensiones de la Herramienta (Efector Final)
+        self.L_tool_h: float = 30.0
+        self.L_tool_v: float = 45.0
 
         # Restricciones
         self.singularity_margin_mm = 3.0   # Margen de seguridad para evitar singularidad en frontera
+
+        # --- Vectores de Calibracion de Hardware ---
+        # Relacion de transmision mecanica
+        self.hw_ratio = np.array([22.0 / 50.0, 1.0 , 1.0], dtype=np.float32)
+
+        # q1: directo, q2: directo, q3:invertido
+        self.hw_dir = np.array([-1.0, -1.0, 1.0], dtype=np.float32)
+
+        ajuste_visual_j2 = 15.0
+        ajuste_visual_j3 = -35.0
+        # Offsets en radiantes
+        self.hw_offset = np.array([
+            np.deg2rad(39.6),  
+            np.deg2rad(160.0 + ajuste_visual_j2), 
+            np.deg2rad(-180.0 + ajuste_visual_j3) 
+        ], dtype=np.float32)
         
-        # Limites Fisicos Estaticos (radianes)
-        self.q1_min_rad = np.deg2rad(0.0)
-        self.q1_max_rad = np.deg2rad(180.0)
+        # --- Limites Fisicos Estaticos (radianes) ---
+        self.q1_min_rad = np.deg2rad(-39.6)
+        self.q1_max_rad = np.deg2rad(+39.6)
         self.q2_min_rad = np.deg2rad(39.0)
         self.q2_max_rad = np.deg2rad(120.0)
 
         # Transformacion de Celda de Trabajo (GCS a MCS)
         self.T_GCS_MCS = np.eye(4, dtype=np.float32)
 
-        #! Vectores de calibracion de hardware
-        # q1: directo, q2: directo, q3:invertido
-        self.hw_dir = np.array([1.0, 1.0, -1.0], dtype=np.float32)
-        # offsets en radiantes
-        self.hw_offset = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-
         # Estado Interno
         if initial_q_rad is None:
             self.q = np.zeros(3, dtype=np.float32)
         else:
             self.q = np.array(initial_q_rad, dtype=np.float32)
-        self.logger.debug(f"Estado inicial de articulaciones (rad): {self.q}")
 
-        # Cache de Coordenadas cartesianas absolutas. (1, 6, 3) [GCS, MCS, J1, J2, WP, TCP]
-        self.cartesian_state = np.zeros((1, 6, 3), dtype=np.float32)
+        # Cache de Coordenadas cartesianas absolutas. (1, 7, 3) [GCS, MCS, J1, J2, WP, FLANGE, TCP]
+        self.cartesian_state = np.zeros((1, 7, 3), dtype=np.float32)
         self._update_internal_state(self.q)
 
     
@@ -59,7 +71,7 @@ class RoboticArmMK2:
         return self.q.copy()
     
     def get_cartesian_state(self) -> np.ndarray:
-        """Retorna la matriz (6, 3) del estado actual absoluto (GCS)."""
+        """Retorna la matriz (7, 3) del estado actual absoluto (GCS)."""
         return self.cartesian_state[0].copy()
 
 
@@ -69,11 +81,11 @@ class RoboticArmMK2:
         Traduce valores crudos de los servomotores al espacio matemático.
         q_servo en radianes
         """
-        return (q_servo * self.hw_dir) + self.hw_offset
+        return (q_servo * self.hw_dir * self.hw_ratio) + self.hw_offset
 
     def kinematic_to_servo(self, q_kin: np.ndarray) -> np.ndarray:
         """Traduce ángulos matemáticos a valores físicos de los servomotores."""
-        return (q_kin - self.hw_offset) / self.hw_dir
+        return (q_kin - self.hw_offset) / (self.hw_dir * self.hw_ratio)
     
     def map_kinematic_trajectory_to_servos(self, q_kin_matrix: np.ndarray) -> np.ndarray:
         """
@@ -81,7 +93,7 @@ class RoboticArmMK2:
         y la traduce de vuelta a ángulos que el microcontrolador entienda (0 a 180°).
         """
         # Operación vectorizada: Q_servo = (Q_kin - offset) / dir
-        q_servo_matrix = (q_kin_matrix - self.hw_offset) / self.hw_dir
+        q_servo_matrix = (q_kin_matrix - self.hw_offset) / (self.hw_dir * self.hw_ratio)
         return q_servo_matrix
     
     
@@ -92,17 +104,24 @@ class RoboticArmMK2:
         Realiza saturacion de valores anomalos a los limites fisicos
         """
         q_servo = np.array([q1_servo_rad, q2_servo_rad, q3_servo_rad], dtype=np.float32)
-        q_kin = (q_servo * self.hw_dir) + self.hw_offset
+        q_kin = self.servo_to_kinematic(q_servo)
+        
+        # Calcular limites q3
+        q3_min, q3_max = self._calc_q3_limits(q_kin[1])
 
+        # Saturacion
         q1_safe = np.clip(q_kin[0], self.q1_min_rad, self.q1_max_rad)
         q2_safe = np.clip(q_kin[1], self.q2_min_rad, self.q2_max_rad)
-
-        # Calcular limites q3 dinamicamente
-        q3_min, q3_max = self._calc_q3_limits(q2_safe)
         q3_safe = np.clip(q_kin[2], q3_min, q3_max)
 
-        q_safe = np.array([q1_safe, q2_safe, q3_safe], dtype=np.float32)
+        if not np.allclose([q_kin[0], q_kin[1], q_kin[2]], [q1_safe, q2_safe, q3_safe], atol=1e-3):
+             self.logger.warning(
+                 f"¡Saturación Cinemática Detectada! "
+                 f"Kin_Raw: [{np.rad2deg(q_kin[0]):.1f}°, {np.rad2deg(q_kin[1]):.1f}°, {np.rad2deg(q_kin[2]):.1f}°] -> "
+                 f"Safe: [{np.rad2deg(q1_safe):.1f}°, {np.rad2deg(q2_safe):.1f}°, {np.rad2deg(q3_safe):.1f}°]"
+             )
 
+        q_safe = np.array([q1_safe, q2_safe, q3_safe], dtype=np.float32)
         self._update_internal_state(q_safe)
     
     def _update_internal_state(self, q_vector: np.ndarray) -> None:
@@ -110,15 +129,23 @@ class RoboticArmMK2:
         Actualiza la variable de estado y recalcula la cache de coordenadas cartesianas.
         """
         self.q[:] = q_vector
-        # Se invoca la cinematica directa expandiendo las dimensiones a (1, 3)
         self.cartesian_state = self.forward_kinematics(self.q[np.newaxis, :])
         
     def _calc_q3_limits(self, q2_rad: float) -> Tuple[float, float]:
         """Calcula los límites dinámicos mecánicos para la articulación 3."""
         q2_deg = np.rad2deg(q2_rad)
-        q3_min_deg = (-0.6755 * q2_deg) - 70.768
-        q3_max_deg = (-0.7165 * q2_deg) - 13.144
-        return np.deg2rad(q3_min_deg), np.deg2rad(q3_max_deg)   
+        
+        # Ecuaciones teóricas base del paralelogramo
+        q3_min_teorico = (-0.6755 * q2_deg) - 70.768
+        q3_max_teorico = (-0.7165 * q2_deg) - 13.144
+        
+        # Tolerancia de Ensamblaje
+        tolerancia_grados = 45.0  
+        
+        q3_min_real = q3_min_teorico - tolerancia_grados
+        q3_max_real = q3_max_teorico + tolerancia_grados
+        
+        return np.deg2rad(q3_min_real), np.deg2rad(q3_max_real) 
 
     
     # ==== MOTOR DE CINEMATICA ====
@@ -188,13 +215,11 @@ class RoboticArmMK2:
         T_GCS_3 = self.T_GCS_MCS @ T_03
 
         # Ensamblaje del tensor resultante
-        cartesian_tensor = np.zeros((N, 6, 3), dtype=np.float32)
+        cartesian_tensor = np.zeros((N, 7, 3), dtype=np.float32)
 
         # Origenes estaticos
         cartesian_tensor[:, 0, :] = 0.0
         cartesian_tensor[:, 1, :] = self.T_GCS_MCS[:3, 3]
-
-        # Extracción de traslaciones dinámicas (Slicing)
         cartesian_tensor[:, 2, :] = T_GCS_1[:, :3, 3]               # J1
         cartesian_tensor[:, 3, :] = T_GCS_2[:, :3, 3]               # J2
         cartesian_tensor[:, 4, :] = T_GCS_3[:, :3, 3]               # WP
@@ -202,16 +227,21 @@ class RoboticArmMK2:
         # Restricción del Paralelogramo (TCP vectorizado)
         R_GCS_MCS = self.T_GCS_MCS[:3, :3]
         
-        # delta_tcp_local tiene dimensión (3, N)
-        delta_tcp_local = np.array([
+        # Punto 5: Brida de acoplamiento (Flange) utilizando L4
+        delta_flange_local = np.array([
             self.L4 * np.cos(q_matrix[:, 0]),
             self.L4 * np.sin(q_matrix[:, 0]),
             np.zeros(N)
         ], dtype=np.float32)
+        cartesian_tensor[:, 5, :] = cartesian_tensor[:, 4, :] + (R_GCS_MCS @ delta_flange_local).T
         
-        # Trasposición necesaria para compatibilidad de dimensiones (N, 3)
-        delta_tcp_global = (R_GCS_MCS @ delta_tcp_local).T
-        cartesian_tensor[:, 5, :] = cartesian_tensor[:, 4, :] + delta_tcp_global
+        # Punto 6: Verdadero TCP aplicando el desfase de la bomba de succión en "L"
+        delta_tool_local = np.array([
+            self.L_tool_h * np.cos(q_matrix[:, 0]),
+            self.L_tool_h * np.sin(q_matrix[:, 0]),
+            np.full(N, -self.L_tool_v)  # Desplazamiento vertical hacia abajo en el eje Z del robot
+        ], dtype=np.float32)
+        cartesian_tensor[:, 6, :] = cartesian_tensor[:, 5, :] + (R_GCS_MCS @ delta_tool_local).T
 
         return cartesian_tensor
     
@@ -239,9 +269,10 @@ class RoboticArmMK2:
         q1 = np.arctan2(y, x)
 
         # Desplazamiento del efector hacia la muñeca
-        xw = x - self.L4 * np.cos(q1)
-        yw = y - self.L4 * np.sin(q1)
-        zw = z
+        L4_effective = self.L4 + self.L_tool_h
+        xw = x - L4_effective * np.cos(q1)
+        yw = y - L4_effective * np.sin(q1)
+        zw = z + self.L_tool_v
 
         r_planar = np.hypot(xw, yw)
         z_diff = zw - self.L1
@@ -255,18 +286,12 @@ class RoboticArmMK2:
         # Reduccion del espacio de trabajo para prevenir singularidad
         r_max_safe = r_max_geometric - self.singularity_margin_mm
         r_min_safe = r_min_geometric + self.singularity_margin_mm
-
-        # Validación de Espacio de Trabajo Físico (Vectorizada)
-        max_reach_safe_sq = r_max_safe**2
-        min_reach_safe_sq = r_min_safe**2
         
         # Validación vectorizada de frontera
-        valid_mask = (d_squared <= max_reach_safe_sq) & (d_squared >= min_reach_safe_sq)
+        valid_mask = (d_squared <= r_max_safe**2) & (d_squared >= r_min_safe**2)
 
         # Resolución Trigonométrica
-        cos_q3 = (d_squared - self.L2**2 - self.L3**2) / (2 * self.L2 * self.L3)
-        cos_q3 = np.clip(cos_q3, -1.0, 1.0)
-        
+        cos_q3 = np.clip((d_squared - self.L2**2 - self.L3**2) / (2 * self.L2 * self.L3), -1.0, 1.0)
         q3 = -np.arccos(cos_q3)
         
         q2_alpha = np.arctan2(z_diff, r_planar)

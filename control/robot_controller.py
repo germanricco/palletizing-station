@@ -199,33 +199,34 @@ class RobotController:
         Formato de entrada esperado (data_str): "J1,J2,J3,A1"
         """
         try:
+            clean_str = data_str.strip()
+            if clean_str.startswith("T:"):
+                clean_str = clean_str[2:]
+
             # Extraccion y Validacion Estructural
-            partes = data_str.split(',')
+            partes = clean_str.split(',')
 
             # Defensa contra truncamiento de trama UART
             if len(partes) != 4:
-                self.logger.warning(f"Descarte de Telemetria. Longitud de trama anomala: '{data_str}'.")
                 return
             
-            # Conversion de tipos
-            s1, s2, s3 = float(partes[0]), float(partes[1]), float(partes[2])
+            s1_deg, s2_deg, s3_deg = float(partes[0]), float(partes[1]), float(partes[2])
             is_actuator_on = bool(int(partes[3]))
 
             # Si estamos simulando ignoramos la telemetria
             if self._is_simulating:
                 return
+
+            s1_rad = np.deg2rad(s1_deg)
+            s2_rad = np.deg2rad(s2_deg)
+            s3_rad = np.deg2rad(s3_deg)
             
-            # Crea vector de estado articular
-            servos_array = np.array([s1, s2, s3], dtype=np.float32)
-
-            # Convierte a valores articulares en radianes a cinematicos
-            kin_array = self.robot.servo_to_kinematic(servos_array)
-
-            # Actualizar estado del Digital Twin
-            self.robot.update_state(kin_array[0], kin_array[1], kin_array[2])
-
-            # Almacenar estado logico de actuadores en diccionario
+            # Entregar datos al modelo cinematico y actualizar estado
+            self.robot.update_state(s1_rad, s2_rad, s3_rad)
             self.actuator_active = is_actuator_on
+
+            # Obtener el estado procesado y seguro
+            kin_array = self.robot.get_angular_state()
 
             # Persistencia en Memoria (Modo RECORDING)
             if self.current_state == SystemState.RECORDING:
@@ -268,6 +269,9 @@ class RobotController:
             # Evento hipotetico a implementar
             self.logger.error("Hardware reporto perdida de comunicacion de seguridad.")
             self._change_internal_state(SystemState.FAULT)
+
+        #! elif event_msg == "EVT:SENSOR":
+            # cual trayectoria ejecuto?, como?
         
         else:
             self.logger.warning(f"Evento de hardware no reconocido: {event_msg}")

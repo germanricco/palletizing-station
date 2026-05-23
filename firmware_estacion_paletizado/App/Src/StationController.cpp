@@ -107,7 +107,7 @@ void Controller::update(uint32_t nowMs) {
     // Transicion de succion (100%) a retencion (10%)
     if (_efectorFinal.getState() == ActuatorState::Suction) {
     	if ((nowMs - _tiempoInicioSuccion) >= 2000U ) {
-    		_efectorFinal.commandHold(0.1f);
+    		_efectorFinal.commandHold(0.5f);
     		Logger::logDEBUG("Actuador: Vacio asegurado. Pasando a Holding");
     	}
     }
@@ -592,9 +592,9 @@ void Controller::enviarTelemetria(void) {
     char msg[96];
 
     // Estado de Servos
-    const float j1_rad = _servoBase.getAngleRadians();
-    const float j2_rad = _servoHombro.getAngleRadians();
-    const float j3_rad = _servoCodo.getAngleRadians();
+    const float j1_deg = _servoBase.getAngleDegrees();
+    const float j2_deg = _servoHombro.getAngleDegrees();
+    const float j3_deg = _servoCodo.getAngleDegrees();
 
     // Estado de Actuador
     int a1 = 0;
@@ -603,7 +603,7 @@ void Controller::enviarTelemetria(void) {
     	a1 = 1;
     }
 
-    std::snprintf(msg, sizeof(msg), "T:%.2f,%.2f,%.2f,%d\r\n", j1_rad, j2_rad, j3_rad, a1);
+    std::snprintf(msg, sizeof(msg), "T:%.2f,%.2f,%.2f,%d\r\n", j1_deg, j2_deg, j3_deg, a1);
     _terminal.enviarNormal(msg);
 }
 
