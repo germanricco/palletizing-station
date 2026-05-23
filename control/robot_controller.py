@@ -325,13 +325,14 @@ class RobotController:
             self.recording_buffer.clear()
 
         elif new_state == SystemState.IDLE:
-            # Se garantiza que no queden datos residuales en memoria
-            if getattr(self, 'active_trajectory', None) is not None:
-                self.logger.debug("Purgando cache de trayectoria automatica.")
-                self.active_trajectory = None
+            # Purgamos la trayectoria si no estamos en una receta de palletizado
+            if len(self.active_recipe) == 0:
+                if getattr(self, 'active_trajectory', None) is not None:
+                    self.logger.debug("Purgando cache de trayectoria automatica.")
+                    self.active_trajectory = None
 
-                if self.trajectory_loaded_callback is not None:
-                    self.trajectory_loaded_callback("")
+                    if self.trajectory_loaded_callback is not None:
+                        self.trajectory_loaded_callback("")
 
             self.streamer.reset()
 
@@ -532,6 +533,15 @@ class RobotController:
         self.current_recipe_step = 0
         self.pallets_completed = 0
         self.logger.info(f"Receta cargada con {len(filenames)} posiciones")
+
+        if self.trajectory_loaded_callback is not None:
+             self.trajectory_loaded_callback({
+                 'type': 'RECIPE',
+                 'count': len(self.active_recipe),
+                 'current': 1,
+                 'pallets': 0
+             })
+
         return True
     
     def start_palletizing(self) -> bool:
@@ -562,11 +572,26 @@ class RobotController:
         Aborta la receta de forma segura.
         """
         if len(self.active_recipe) > 0:
-            self.logger.info("Abortando palletizado.")
-            self.active_recipe.clear()
+            self.logger.info("Abortando ciclo de palletizado. Rebobinando")
+            self.current_recipe_step = 0  # Rebobinamos
 
         if self.current_state == SystemState.AUTO_WAITING_SENSOR:
             self._change_internal_state(SystemState.AUTO_READY)
+
+    def unload_recipe(self) -> None:
+        """
+        Llamado explícitamente por la GUI cuando el usuario cierra la receta 
+        o presiona un botón de 'Limpiar'.
+        """
+        self.logger.info("Descargando receta de palletizado de la memoria.")
+        self.active_recipe.clear()
+        self.current_recipe_step = 0
+        self.pallets_completed = 0
+        self.active_trajectory = None
+        
+        # Avisar a la GUI que ya no hay archivo cargado
+        if self.trajectory_loaded_callback is not None:
+            self.trajectory_loaded_callback("")
 
     def _advance_recipe(self) -> None:
         """
@@ -613,6 +638,18 @@ class RobotController:
         self.logger.info(f"Trayectoria '{filename}' guardada exitosamente.")
         self._pending_save_matrix = None # Liberar RAM
 
+    def load_single_trajectory(self, trajectory_name: str) -> bool:
+        """
+        Wrapper para cargas de trayectoria única solicitadas desde la UI.
+        Garantiza que cualquier receta residual en memoria sea purgada.
+        """
+        if len(self.active_recipe) > 0:
+            self.logger.debug("Purgando receta activa por carga de trayectoria manual.")
+            self.active_recipe.clear()
+            
+        # Llama al método base para cargar en RAM y notificar a la UI
+        return self.load_trajectory(trajectory_name)
+    
     def load_trajectory(self, trajectory_name: str) -> bool:
         """
         Carga de memoria RAM. Requiere validacion de estado
@@ -637,8 +674,17 @@ class RobotController:
 
         # Invocacion de callback hacia UI para notificar que la trayectorai esta cargada.
         if self.trajectory_loaded_callback is not None:
-            # Enviamos el nombre del archivo (puedes enviar también la matriz si quieres dibujar la línea proyectada en rojo)
-            self.trajectory_loaded_callback(trajectory_name)
+            if len(self.active_recipe) > 0:
+                # Estamos en modo receta, actualizamos el status completo
+                self.trajectory_loaded_callback({
+                    'type': 'RECIPE',
+                    'count': len(self.active_recipe),
+                    'current': self.current_recipe_step + 1,
+                    'pallets': self.pallets_completed
+                })
+            else:
+                # Modo normal
+                self.trajectory_loaded_callback({'type': 'SINGLE', 'name': trajectory_name})
 
         return True
     

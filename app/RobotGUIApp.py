@@ -29,7 +29,7 @@ class SignalBridge(QObject):
     telemetry_received = Signal(object, list, object, bool, int)    # telemetria
     trajectory_loaded = Signal(str)      # trayectoria cargada, emite el nombre del archivo
     prompt_save_requested = Signal(str)  # solicitar nombre de guardado
-
+    trajectory_loaded = Signal(dict)
 
 
 class RobotGUIApp:
@@ -104,22 +104,28 @@ class RobotGUIApp:
 
         # B. Panel de Control
         panel = self.window.control_panel_widget
-        
+
         # Comunicaciones
         panel.request_connection.connect(self._handle_connection_request)
-
+        
         # Modos Logicos
         panel.request_mode_idle.connect(self.controller.request_idle_state)
         panel.request_mode_manual.connect(self.controller.request_manual_mode)
         panel.request_mode_auto.connect(self.controller.request_auto_ready)
-
-        # Jogging
+        
+        # Jogging y Actuador Final
         panel.request_jog.connect(self.controller.execute_jog)
-
-        # Memoria
+        panel.request_toggle_actuator.connect(self.controller.toggle_actuator)
+        
+        # Memoria y Palletizado
         panel.request_start_recording.connect(self.controller.start_recording)
         panel.request_stop_recording.connect(self.controller.stop_recording)
-        panel.request_load_trajectory.connect(self.controller.load_trajectory)
+        
+        panel.request_load_trajectory.connect(self.controller.load_single_trajectory)
+        panel.request_load_recipe.connect(self.controller.load_recipe)
+        panel.request_start_palletizing.connect(self.controller.start_palletizing)
+        panel.request_stop_palletizing.connect(self.controller.stop_palletizing)
+        panel.request_unload_memory.connect(self.controller.unload_recipe)
         
         # Ejecucion de Trayectoria
         panel.request_execute_auto.connect(self.controller.execute_auto)
@@ -164,11 +170,11 @@ class RobotGUIApp:
             self._last_progress = progress
             self._last_actuator_state = actuator_active
 
-    def _on_trajectory_loaded(self, filename: str) -> None:
+    def _on_trajectory_loaded(self, payload: dict) -> None:
         """
         Puente seguro: Recibe del backend y emite la señal hacia el hilo principal de la GUI.
         """
-        self.bridge.trajectory_loaded.emit(filename)
+        self.bridge.trajectory_loaded.emit(payload)
 
     def _on_prompt_save_requested(self, default_name: str) -> None:
         """Puente para saltar al hilo principal de Qt."""

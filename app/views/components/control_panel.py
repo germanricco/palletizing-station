@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QDialog,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from app.core.constants import AppConfig
 from app.views.components.jogging_card import JoggingCard
+from app.views.components.recipe_dialog import RecipeBuilderDialog
 
 class ControlPanel(QWidget):
     """
@@ -40,6 +42,12 @@ class ControlPanel(QWidget):
     request_start_recording = Signal()
     request_stop_recording = Signal()
     request_load_trajectory = Signal(str) # envia nombre de archivo
+
+    # Senales de Paletizado
+    request_load_recipe = Signal(list)
+    request_start_palletizing = Signal()
+    request_stop_palletizing = Signal()
+    request_unload_memory = Signal()
 
     # Senales de Ejecucion
     request_execute_auto = Signal()
@@ -314,9 +322,19 @@ class ControlPanel(QWidget):
         self.stack_record.addWidget(self.btn_record)
         self.stack_record.addWidget(self.btn_stop_record)
 
-        # --- FILA 1, COLUMNA 1: Botón Cargar Trayectoria
+        # --- FILA 1, COLUMNA 1: Stack de Carga / Descarga
+        self.stack_load = QStackedWidget()
+        
+        # Índice 0: Cargar
         self.btn_load = self._create_button("CARGAR TRAY.", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, AppConfig.COLORS.BORDERS)
         self.btn_load.clicked.connect(self._on_load_clicked)
+        
+        # Índice 1: Limpiar Memoria (Rojo)
+        self.btn_unload = self._create_button("LIMPIAR MEMORIA", "#2A2A2A", "#FF3B30", "#FF3B30")
+        self.btn_unload.clicked.connect(self.request_unload_memory.emit)
+        
+        self.stack_load.addWidget(self.btn_load)
+        self.stack_load.addWidget(self.btn_unload)
 
         # --- FILA 2, COLUMNA 0: Stack de Simulacion y Cancelacion ---
         self.stack_abort = QStackedWidget()
@@ -340,30 +358,40 @@ class ControlPanel(QWidget):
         # --- FILA 2, COLUMNA 1: Stack de Ejecución ---
         self.stack_execute = QStackedWidget()
         
-        # Índice 0: Ejecutar (Verde)
+        # 0: Ejecutar (Verde)
         self.btn_execute = self._create_button("EJECUTAR", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, "#34C759")
         self.btn_execute.clicked.connect(self.request_execute_auto.emit)
         
-        # Índice 1: Pausar (Ambar)
+        # 1: Pausar (Ambar)
         self.btn_pause = self._create_button("PAUSAR", "#2A2A2A", "#FF9500", "#FF9500")
         self.btn_pause.clicked.connect(self.request_pause_trajectory.emit)
         
-        # Índice 2: Reanudar (Verde)
+        # 2: Reanudar (Verde)
         self.btn_resume = self._create_button("REANUDAR", "#1E1E1E", {AppConfig.COLORS.TEXT_HIGH}, "#34C759")
         self.btn_resume.clicked.connect(self.request_resume_trajectory.emit)
         
-        self.stack_execute.addWidget(self.btn_execute)
-        self.stack_execute.addWidget(self.btn_pause)
-        self.stack_execute.addWidget(self.btn_resume)
+        # 3: Armar Pallet
+        self.btn_arm_pallet = self._create_button("ARMAR PALLET", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, "#A259FF") 
+        self.btn_arm_pallet.clicked.connect(self.request_start_palletizing.emit)
+
+        # 4: Detener Pallet
+        self.btn_stop_pallet = self._create_button("DETENER PALLET", "#2A2A2A", "#FF3B30", "#FF3B30")
+        self.btn_stop_pallet.clicked.connect(self.request_stop_palletizing.emit)
+
+        self.stack_execute.addWidget(self.btn_execute)     # 0
+        self.stack_execute.addWidget(self.btn_pause)       # 1
+        self.stack_execute.addWidget(self.btn_resume)      # 2
+        self.stack_execute.addWidget(self.btn_arm_pallet)  # 3
+        self.stack_execute.addWidget(self.btn_stop_pallet) # 4
 
         # Configuramos políticas para que todos llenen su celda
         policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        for w in [self.stack_record, self.btn_load, self.stack_abort, self.stack_execute]:
+        for w in [self.stack_record, self.stack_load, self.stack_abort, self.stack_execute]:
             w.setSizePolicy(policy)
 
         # Ensamblaje del Grid
         layout.addWidget(self.stack_record, 0, 0)
-        layout.addWidget(self.btn_load, 0, 1)
+        layout.addWidget(self.stack_load, 0, 1)
         layout.addWidget(self.stack_abort, 1, 0)
         layout.addWidget(self.stack_execute, 1, 1)
 
@@ -462,7 +490,7 @@ class ControlPanel(QWidget):
     
     
     # ==== ACTUALIZACIONES DE ESTADO (SLOTS UI) ====
-    def update_machine_state(self, current_state) -> None:
+    def update_machine_state(self, current_state, progress: int = 0, is_recipe_mode: bool = False) -> None:
         """
         Actualiza el diseño visual del Segmented Control para reflejar el estado actual.
         Llamado asíncronamente cuando llega nueva telemetría.
@@ -477,17 +505,14 @@ class ControlPanel(QWidget):
             f"font-weight: bold; font-size: 14px;"
         )
 
-        # Mapeo de estados lógicos a los 3 botones principales
+        # 1. MAPEO DE ESTADOS LOGICOS A LOS 3 BOTONES PRINCIPALES
         if state_name == "IDLE":
-            # Blanco o gris muy claro para IDLE
             self.btn_idle.setStyleSheet(f"background-color: #E5E5EA; {active_style}")
             
         elif state_name in ["MANUAL", "RECORDING"]:
-            # Cian para operaciones manuales/grabación
             self.btn_manual.setStyleSheet(f"background-color: {AppConfig.COLORS.SEMANTIC_MANUAL}; {active_style}")
             
-        elif state_name in ["AUTO_READY", "AUTO_RUNNING", "AUTO_PAUSED"]:
-            # Verde para automático (Ajustar color si existe uno específico en AppConfig)
+        elif state_name in ["AUTO_READY", "AUTO_RUNNING", "AUTO_PAUSED", "AUTO_WAITING_SENSOR"]:
             self.btn_auto.setStyleSheet(f"background-color: #34C759; {active_style}")
 
         # Logica de UI para Grabacion
@@ -496,31 +521,80 @@ class ControlPanel(QWidget):
         else:
             self.stack_record.setCurrentIndex(0)
 
-        # 2. LÓGICA DE EJECUCIÓN DINÁMICA
-        # Solo permitimos abrir el explorador de archivos si estamos listos en AUTO
-        can_load = (state_name == "AUTO_READY")
-        self._set_button_enabled(self.btn_load, can_load)
+        # 2. LÓGICA DE GESTIÓN DE MEMORIA (CARGA Y DESCARGA)
+        # Evaluamos si hay algo cargado leyendo la etiqueta de estado
+        current_label_text = self.lbl_loaded_file.text()
+        has_file_loaded = current_label_text != "ARCHIVO: [ NINGUNO ]"
+        
+        # Si hay archivo, mostramos "LIMPIAR MEMORIA" (1), sino "CARGAR" (0)
+        self.stack_load.setCurrentIndex(1 if has_file_loaded else 0)
+        
+        # Solo se puede interactuar con la memoria si el sistema está en AUTO_READY
+        can_manage_memory = (state_name == "AUTO_READY")
+        self._set_button_enabled(self.stack_load.currentWidget(), can_manage_memory)
 
-        # 4. LÓGICA DE EJECUCIÓN DINÁMICA Y ABORTO
+        # 3. LÓGICA DE EJECUCIÓN, SIMULACION Y PALLETIZADO
         if state_name == "AUTO_READY":
-            # Trayectoria cargada/lista. SIMULAR y EJECUTAR activos.
+            if progress > 0:
+                # Simulando
+                self.stack_abort.setCurrentIndex(1)  # DETENER SIM.
+                self.stack_execute.setCurrentIndex(0)
+                self._set_button_enabled(self.btn_simulate, False)
+                self._set_button_enabled(self.btn_execute, False)
+
+            else:
+                self.stack_abort.setCurrentIndex(0)  # SIMULAR
+                self._set_button_enabled(self.btn_simulate, True)
+
+                if is_recipe_mode:
+                    self.stack_execute.setCurrentIndex(3)  # ARMAR PALLET
+                else:
+                    self.stack_execute.setCurrentIndex(0)  # EJECUTAR
+            
+                # Activamos el boton correspondiente
+                self._set_button_enabled(self.stack_execute.currentWidget(), True)
+            
+        # 4. LÓGICA DE BLOQUEO DE TELEOPERACIÓN
+        is_manual = (state_name == "MANUAL")
+        
+        # Bloquear/Habilitar tarjetas de ejes (+ / -)
+        for card in getattr(self, 'cards', []):
+            card.setEnabled(is_manual)
+            
+        # Bloquear/Habilitar botón de Modo Articular/Cartesiano
+        if hasattr(self, 'btn_jog_mode'):
+            self.btn_jog_mode.setEnabled(is_manual)
+            
+        # Bloquear/Habilitar botón del Actuador Final
+        if hasattr(self, 'btn_actuator'):
+            self.btn_actuator.setEnabled(is_manual)
+            
+            # Feedback visual extra para el actuador cuando está bloqueado
+            if not is_manual:
+                self.btn_actuator.setStyleSheet(
+                    f"background-color: #1A1A1A; color: #555555; border: none; border-radius: 4px;"
+                    f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; font-size: 12px;"
+                )
+            else:
+                # Si entramos a MANUAL, restauramos su color normal (Encendido o Apagado)
+                self._update_actuator_button_style()
+        
+        elif state_name == "AUTO_WAITING_SENSOR":
+            # El sistema está armado y esperando la caja
             self.stack_abort.setCurrentIndex(0)
-            self.stack_execute.setCurrentIndex(0)
-            
-            # Bloqueamos Simular si no hay nada cargado (lo controlamos desde afuera, pero lo habilitamos visualmente si llegó a AUTO_READY)
-            self._set_button_enabled(self.btn_simulate, True)
-            self._set_button_enabled(self.btn_execute, True)
-            
+            self.stack_execute.setCurrentIndex(4) # DETENER PALLET
+            self._set_button_enabled(self.btn_simulate, False) # No se simula cuando está armado
+
         elif state_name == "AUTO_RUNNING":
             # Ejecutándose. Cambia Ejecutar por PAUSAR. Bloquea Simular.
             self.stack_abort.setCurrentIndex(0)
-            self.stack_execute.setCurrentIndex(1)
+            self.stack_execute.setCurrentIndex(1)   # PAUSAR
             self._set_button_enabled(self.btn_simulate, False)
             
         elif state_name == "AUTO_PAUSED":
             # Pausado. Aparece CANCELAR y REANUDAR.
-            self.stack_abort.setCurrentIndex(1)
-            self.stack_execute.setCurrentIndex(2)
+            self.stack_abort.setCurrentIndex(2)     # CANCELAR
+            self.stack_execute.setCurrentIndex(2)   # REANUDAR
             
         else:
             # Cualquier otro estado (IDLE, MANUAL, RECORDING). Todo bloqueado.
@@ -567,27 +641,44 @@ class ControlPanel(QWidget):
                 f"font-weight: bold;"
             )
 
-    def update_loaded_file_name(self, filename: str) -> None:
+    def update_loaded_file_name(self, payload: dict) -> None:
         """
-        Slot público: Actualiza el indicador de archivo cargado en la UI.
-        Si se le pasa None o un string vacío, lo reinicia.
+        Actualiza el indicador de archivo cargado en la UI.
+        Recibe un diccionario con info.
+        Ej: {'type': 'SINGLE', 'name': 'caja_1'} 
+        o {'type': 'RECIPE', 'count': 4, 'current': 1, 'pallets': 0}
         """
-        if filename:
-            self.lbl_loaded_file.setText(f"ARCHIVO: [ {filename.upper()} ]")
-            # Cambiamos a verde para indicar que está listo para simular/ejecutar
-            self.lbl_loaded_file.setStyleSheet(
-                f"color: {AppConfig.COLORS.SEMANTIC_AUTO};"
-                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
-                f"font-size: 12px;"
-            )
-        else:
+        # 1. Si llega None o vacío, reiniciamos el estado
+        if not payload:
             self.lbl_loaded_file.setText("ARCHIVO: [ NINGUNO ]")
-            # Vuelve a ámbar/gris indicando que no hay nada cargado
             self.lbl_loaded_file.setStyleSheet(
                 f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};"
                 f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
                 f"font-size: 12px;"
             )
+            return
+
+        # 2. Si hay datos, preparamos el color verde de activo
+        self.lbl_loaded_file.setStyleSheet(
+            f"color: {AppConfig.COLORS.SEMANTIC_AUTO};"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
+            f"font-size: 12px;"
+        )
+        
+        # 3. Enrutamos según el tipo de carga
+        payload_type = payload.get('type')
+        
+        if payload_type == 'SINGLE':
+            filename = payload.get('name', 'DESCONOCIDO')
+            self.lbl_loaded_file.setText(f"ARCHIVO: [ {filename.upper()} ]")
+            
+        elif payload_type == 'RECIPE':
+            # Muestra feedback de estación de palletizado en vivo
+            current = payload.get('current', 0)
+            count = payload.get('count', 0)
+            pallets = payload.get('pallets', 0)
+            
+            self.lbl_loaded_file.setText(f"RECETA: [ CAJA {current}/{count} ] | PALLETS: {pallets}")
 
     def update_telemetry(self, joints: list[float], tcp: list[float]) -> None:
         """
@@ -623,26 +714,20 @@ class ControlPanel(QWidget):
 
     def _on_load_clicked(self) -> None:
         """Abre un cuadro de diálogo nativo para seleccionar la trayectoria."""
-        # Se asume que la carpeta 'trajectories' está en el directorio base
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../trajectories'))
         
-        # Si la carpeta no existe, la crea (prevención de crash)
-        if not os.path.exists(base_dir):
-            os.makedirs(base_dir)
+        # Validacion de existencia de directorio
+        if not os.path.exists(base_dir): os.makedirs(base_dir)
 
-        # Abre el popup filtrando solo los formatos soportados
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Seleccionar Trayectoria",
-            base_dir,
-            "Archivos NumPy (*.npy);;Todos los archivos (*)"
-        )
+        dialog = RecipeBuilderDialog(base_dir, self)
 
-        if file_path:
-            # Extrae solo el nombre del archivo sin extensión (ej: 'record_171000234' de 'record_171000234.npy')
-            # Esto se adapta a cómo tu TrajectoryRepository suele guardar y cargar.
-            trajectory_name = Path(file_path).stem 
-            self.request_load_trajectory.emit(trajectory_name)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            load_type, data = dialog.get_results()
+            if load_type == 'SINGLE':
+                self.request_load_trajectory.emit(data[0])
+            elif load_type == 'RECIPE':
+                self.request_load_recipe.emit(data)
 
     def _on_toggle_clicked(self) -> None:
         """Slot interno que emite la intención del usuario hacia el orquestador."""
