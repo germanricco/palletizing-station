@@ -26,7 +26,7 @@ class SignalBridge(QObject):
     """
     Puente de señales para garantizar la seguridad entre hilos.
     """
-    telemetry_received = Signal(np.ndarray, list, object, bool, int)    # telemetria
+    telemetry_received = Signal(object, list, object, bool, int)    # telemetria
     trajectory_loaded = Signal(str)      # trayectoria cargada, emite el nombre del archivo
     prompt_save_requested = Signal(str)  # solicitar nombre de guardado
 

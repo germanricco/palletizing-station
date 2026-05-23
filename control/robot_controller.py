@@ -18,6 +18,7 @@ class SystemState(Enum):
     MANUAL = "MANUAL"
     RECORDING = "RECORDING"
     AUTO_READY = "AUTO_READY"
+    AUTO_WAITING_SENSOR = "AUTO_WAITING_SENSOR"
     AUTO_RUNNING = "AUTO_RUNNING"
     AUTO_PAUSED = "AUTO_PAUSED"
     FAULT = "FAULT"
@@ -49,13 +50,17 @@ class RobotController:
         self.recording_buffer: List[List[float]] = []   # Buffer dinamico en RAM para modo RECORDING
         self._pending_save_matrix: Optional[np.ndarray] = None  # Cache para posponer el guardado de trayectoria
 
+        # Gestor de Recetas (Palletizado)
+        self.active_recipe: List[str] = []      # Lista de archivos de trayectorias en orden
+        self.current_recipe_step: int = 0       # Indice de la caja actual (0 = Caja A)
+        self.pallets_completed: int = 0         # Contador global de ciclos completados
+
         # Componentes del sistema
         self.repository = TrajectoryRepository(storage_dir="trajectories", expected_columns=4)
         self.robot = RoboticArmMK2()
         self.uart = AsyncUARTCommunicator(port=port, baudrate=baudrate)
         self.streamer = TrajectoryStreamer(comm=self.uart, chunk_size=chunk_size, precision=4, num_dofs=3)
 
-        # Estado de actuador
         self.actuator_active: bool = False
 
         # Callbacks
@@ -63,6 +68,7 @@ class RobotController:
         self.streamer.progress_callback = self._on_streamer_progress
         self.ui_update_callback = None
         self.prompt_save_callback: Optional[Callable[[str], None]] = None
+        self.trajectory_loaded_callback = None
 
         # Variables para simulacion
         self.active_trajectory = None
@@ -100,21 +106,13 @@ class RobotController:
 
             if self.uart.connect():
                 self.logger.info("Conexión UART establecida exitosamente.")
-                
-                # Sincronización del Espejo: Forzamos el estado a IDLE al conectar
-                # Esto limpia cualquier estado residual previo.
-
                 self.request_idle_state()
                 return True
-
             if attempt < max_retries:
-                self.logger.warning(f"Fallo en el intento {attempt}. Reintentando en {delay_seconds}s...")
+                self.logger.debug(f"Fallo en el intento {attempt}. Reintentando en {delay_seconds}s...")
                 time.sleep(delay_seconds)
 
         self.logger.error("Se agotaron los intentos de conexión. Hardware no accesible.")
-        
-        # Si la conexión falla, retrocedemos al estado INIT (semánticamente correcto 
-        # dentro de tu Enum para "esperando inicialización del hardware").
         self._change_internal_state(SystemState.INIT)
         return False
     
@@ -125,25 +123,19 @@ class RobotController:
         """
         self.logger.info("Solicitud de desconexión. Abortando procesos en curso...")
 
-        # Parada de seguridad a nivel de software (Evita fugas de memoria y bloqueos lógicos)
+        # Parada de seguridad a nivel de software
         self.streamer.reset()
         self.recording_buffer.clear()
+        self.stop_palletizing()
 
-        # Handshake de Desconexión (Hardware Sleep)
+        # Desconexión (Hardware Sleep)
         if self.is_connected:
             self.logger.debug("Enviando comando M98 (Hardware Sleep / Go to INIT)...")
-            
-            # No esperaremos el ACK_M98. Vamos a cortar la conexión inmediatamente.
             self.uart.send_message("M98")
-            
-            # Retardo bloqueante mínimo (100ms) para permitir que el hilo de TX
-            import time
             time.sleep(0.1)
 
         # Desconexión física a través de la capa de comunicación
         self.uart.disconnect()
-
-        # Forzar el estado local a INIT para reflejar la pérdida de enlace
         self._change_internal_state(SystemState.INIT)
         self.logger.info("Desconexión finalizada de manera segura. Sistema Offline.")
 
@@ -154,38 +146,33 @@ class RobotController:
         Enrutador Central. Todo lo que llega del STM32 pasa por este metodo.
         Se ejecuta en el hilo de recepcion (RX Thread) del UART.
         """
-        if not raw_message:
-            return
+        if not raw_message: return
 
         # Sanitizacion
         clean_msg = raw_message.strip()
-
-        # Si el mensaje era solo un salto de linea, lo ignoramos
-        if not clean_msg:
-            return
+        if not clean_msg: return
         
         try:
-            # Decodificar telemetria (Ej: "T:45.0, 30.0, 15.0, 1, 1")
+            # Telemetria
             if clean_msg.startswith("T:"):
                 self._handle_telemetry(clean_msg[2:])
 
+            # Eventos Asincronos
             elif clean_msg.startswith("EVT:"):
                 self._handle_async_event(clean_msg[4:])
 
             # Eventos de cambio de estado
             elif clean_msg.startswith("ACK_M"):
                 self._handle_state_ack(clean_msg)
-
-                # Streamer tambien requiere enterarse de confirmacion ACK_M112
                 if clean_msg == "ACK_M112":
                     self.logger.debug("ACK_M112 Recibido desde firmware. Notificando al Streamer.")
                     self.streamer.process_message(clean_msg)
-
+            
             # Interaccion con el Streamer 
             elif clean_msg == "REQ_CHUNK":
-                self.logger.debug("REQ_CHUNK Recibido desde firmware. Delegando envío al Streamer.")
+                self.logger.debug("REQ_CHUNK Recibido. Delegando al Streamer.")
                 self.streamer.process_message(clean_msg)
-
+            
             # Mensaje no reconocido
             else:
                 self.logger.debug(f"Mensaje no reconocido del STM32: {clean_msg}")
@@ -199,51 +186,31 @@ class RobotController:
         Formato de entrada esperado (data_str): "J1,J2,J3,A1"
         """
         try:
-            clean_str = data_str.strip()
-            if clean_str.startswith("T:"):
-                clean_str = clean_str[2:]
-
-            # Extraccion y Validacion Estructural
-            partes = clean_str.split(',')
-
-            # Defensa contra truncamiento de trama UART
-            if len(partes) != 4:
-                return
+            # Extraccion y Validacion estructural de Trama
+            partes = data_str.split(',')
+            if len(partes) != 4: return
             
             s1_deg, s2_deg, s3_deg = float(partes[0]), float(partes[1]), float(partes[2])
             is_actuator_on = bool(int(partes[3]))
 
-            # Si estamos simulando ignoramos la telemetria
-            if self._is_simulating:
-                return
+            # Si estamos simulando salimos sin procesar la telemetria real
+            if self._is_simulating: return
 
-            s1_rad = np.deg2rad(s1_deg)
-            s2_rad = np.deg2rad(s2_deg)
-            s3_rad = np.deg2rad(s3_deg)
-            
             # Entregar datos al modelo cinematico y actualizar estado
+            s1_rad, s2_rad, s3_rad = np.deg2rad(s1_deg), np.deg2rad(s2_deg), np.deg2rad(s3_deg)
             self.robot.update_state(s1_rad, s2_rad, s3_rad)
             self.actuator_active = is_actuator_on
-
-            # Obtener el estado procesado y seguro
             kin_array = self.robot.get_angular_state()
 
             # Persistencia en Memoria (Modo RECORDING)
             if self.current_state == SystemState.RECORDING:
-                self.recording_buffer.append([
-                    kin_array[0], kin_array[1], kin_array[2],
-                    float(is_actuator_on)
-                ])
-
-            # Conversion de Radianes a Grados para la UI
-            joints_degrees = np.rad2deg(kin_array).tolist()
+                self.recording_buffer.append([kin_array[0], kin_array[1], kin_array[2], float(is_actuator_on)])
 
             # Propagacion de telemetria hacia la UI (Observer Pattern)
             if self.ui_update_callback is not None:
-                # Se asume que callback implementa mecanismos de Thread-Safe
                 self.ui_update_callback(
                     self.robot.get_cartesian_state(),
-                    joints_degrees,
+                    np.rad2deg(kin_array).tolist(),
                     self.current_state,
                     self.actuator_active
                 )
@@ -252,7 +219,7 @@ class RobotController:
             self.logger.warning(f"Corrupcion de datos en telemetria. '{data_str}': {ve}")
 
         except Exception as e:
-            self.logger.error(f"Fallo critico no gestionado en pipeline de telemetria: {e}")
+            self.logger.error(f"Fallo critico  en pipeline de telemetria: {e}")
 
     def _handle_async_event(self, event_msg: str) -> None:
         """
@@ -265,13 +232,15 @@ class RobotController:
             self.logger.critical("Hardware reporto activacion de parada de emergencia.")
             self._force_emergency_stop("Boton fisico de emergencia presionado.")
 
-        elif event_msg == "COMM_TIMEOUT":
-            # Evento hipotetico a implementar
-            self.logger.error("Hardware reporto perdida de comunicacion de seguridad.")
-            self._change_internal_state(SystemState.FAULT)
+        elif event_msg == "SENSOR":
+            self.logger.info("Interrupcion EVT:SENSOR recibida.")
 
-        #! elif event_msg == "EVT:SENSOR":
-            # cual trayectoria ejecuto?, como?
+            # Ejecutamos solo si estamos esperando
+            if self.current_state == SystemState.AUTO_WAITING_SENSOR:
+                self.logger.info(f"Objeto detectado. Iniciando trayectoria [{self.current_recipe_step + 1}/{len(self.active_recipe)}].")
+                self.execute_auto()
+            else:
+                self.logger.debug("EVT:SENSOR ignorado. Sistema no esta en ciclo de espera.")
         
         else:
             self.logger.warning(f"Evento de hardware no reconocido: {event_msg}")
@@ -296,21 +265,25 @@ class RobotController:
             "ACK_M115": SystemState.AUTO_RUNNING     # Reanudacion de trajectoria
         }
 
-        # ACKs que son válidos pero no alteran la máquina de estados principal
+        # ACKs que son válidos pero no alteran la máquina de estados
         ignored_state_acks = ["ACK_M3", "ACK_M5"]
-
         if ack_msg in ignored_state_acks:
-            self.logger.debug(f"Confirmación de actuador recibida: {ack_msg}")
             return
 
         new_state = mapping.get(ack_msg)
 
         if new_state:
             self.logger.debug(f"Confirmacion recibida: {ack_msg}. Sincronizando estado.")
+            
+            # Intercepcion para estacion de Palletizado
+            if ack_msg == "ACK_M113" and self.current_state == SystemState.AUTO_RUNNING:
+                if len(self.active_recipe) > 0:
+                    self.logger.debug("Segmento de palletizado concluido. Avanzando receta...")
+                    self._advance_recipe()
+                    return
+                
             self._change_internal_state(new_state)
 
-            if ack_msg == "ACK_M115":
-                self.logger.debug("Trayectoria reanudada. El flujo de REQ_CHUNK se reactivará desde el hardware.")
         else:
             self.logger.warning(f"ACK no reconocido: {ack_msg}.")
 
@@ -545,7 +518,83 @@ class RobotController:
         return self._dispatch_command("M101", "Enable Auto Mode")
 
 
-    # ==== GESTION DE TRAYECTORIAS EN MEMORIA ====
+    # ==== GESTOR DE ESTACION DE PALLETIZADO ====
+    def load_recipe(self, filenames: List[str]) -> bool:
+        if self.current_state not in [SystemState.IDLE, SystemState.AUTO_READY, SystemState.MANUAL]:
+            self.logger.warning(f"Carga de receta denegada. Incompatibilidad de estado.")
+            return False
+        
+        if not filenames:
+            self.logger.warning("Receta vacia proporcionada.")
+            return False
+        
+        self.active_recipe = filenames
+        self.current_recipe_step = 0
+        self.pallets_completed = 0
+        self.logger.info(f"Receta cargada con {len(filenames)} posiciones")
+        return True
+    
+    def start_palletizing(self) -> bool:
+        """
+        Arma el sistema y lo pone en espera del primer EVT:SENSOR.
+        """
+        # Validacion de Estado
+        if self.current_state != SystemState.AUTO_READY:
+            self.logger.warning(f"Fallo al iniciar palletizado. Requiere modo AUTO_READY.")
+            return False
+        
+        # Validacion de Receta
+        if not self.active_recipe:
+            self.logger.warning("Fallo al iniciar palletizado. No hay receta cargada.")
+            return False
+        
+        self.current_recipe_step = 0
+        primera_caja = self.active_recipe[0]
+        
+        self.logger.info("Armando estación de palletizado...")
+        if self.load_trajectory(primera_caja):
+            self._change_internal_state(SystemState.AUTO_WAITING_SENSOR)
+            return True
+        return False
+    
+    def stop_palletizing(self) -> None:
+        """"
+        Aborta la receta de forma segura.
+        """
+        if len(self.active_recipe) > 0:
+            self.logger.info("Abortando palletizado.")
+            self.active_recipe.clear()
+
+        if self.current_state == SystemState.AUTO_WAITING_SENSOR:
+            self._change_internal_state(SystemState.AUTO_READY)
+
+    def _advance_recipe(self) -> None:
+        """
+        Lógica interna de avance del ciclo al completar una trayectoria.
+        """
+        self.current_recipe_step += 1
+        
+        # Se completó el pallet?
+        if self.current_recipe_step >= len(self.active_recipe):
+            self.pallets_completed += 1
+            self.current_recipe_step = 0
+            self.logger.info(f"¡PALLET COMPLETADO! Total Pallets Listos: {self.pallets_completed}")
+        
+        # Cargar siguiente caja en el buffer local
+        next_trajectory = self.active_recipe[self.current_recipe_step]
+        self.logger.debug(f"Precargando siguiente bloque en RAM: '{next_trajectory}'")
+        
+        # Transicionamos temporalmente a AUTO_READY para autorizar la carga
+        self._change_internal_state(SystemState.AUTO_READY)
+        
+        if self.load_trajectory(next_trajectory):
+            # Quedamos a la espera del próximo evento de barrera
+            self._change_internal_state(SystemState.AUTO_WAITING_SENSOR)
+        else:
+            self.logger.error("Fallo irrecuperable al precargar. Abortando pallet.")
+            self.stop_palletizing()
+
+    # ==== GESTION DE TRAYECTORIAS Y EJECUCION ====
     def confirm_save_trajectory(self, filename: str, save: bool) -> None:
         """
         Invocado por la UI luego de que el usuario toma una decisión en el diálogo.
@@ -592,6 +641,29 @@ class RobotController:
             self.trajectory_loaded_callback(trajectory_name)
 
         return True
+    
+    def _validate_rth(self, matrix: np.ndarray) -> bool:
+        """
+        Validación por software "Return-To-Home" (RTH) Obligatorio.
+        Compara el inicio y el fin de la trayectoria para asegurar bucle cerrado.
+        """
+        if matrix.shape[0] < 2: return False
+            
+        inicio = matrix[0, :3]
+        fin = matrix[-1, :3]
+        
+        # Tolerancia geométrica de ~2.0 grados en radianes (0.035 rad)
+        # Permite imprecisiones mínimas del joystick al soltarlo en Home
+        tolerancia = np.deg2rad(2.0)
+        
+        if not np.allclose(inicio, fin, atol=tolerancia):
+            self.logger.error(
+                "¡PREVENCIÓN DE RIESGO! La trayectoria no cumple el requisito "
+                "de 'Return-To-Home'. El punto inicial y final difieren. "
+                "Ejecución bloqueada por seguridad."
+            )
+            return False
+        return True
 
     def execute_auto(self) -> bool:
         """
@@ -599,12 +671,12 @@ class RobotController:
         """
         # Validacion de estado simulacion
         if self._is_simulating:
-            self.logger.info("Abortando simulación para iniciar ejecución real.")
+            self.logger.debug("Abortando simulación para iniciar ejecución real.")
             self._is_simulating = False
             time.sleep(0.05) # Pequeño margen para que muera el hilo
 
         # Validacion de estados validos
-        if self.current_state != SystemState.AUTO_READY:
+        if self.current_state not in [SystemState.AUTO_READY, SystemState.AUTO_WAITING_SENSOR]:
             self.logger.warning(f"Ejecucion denegada. Incompatibilidad de estado.")
             return False
 
@@ -612,23 +684,18 @@ class RobotController:
         if getattr(self, 'active_trajectory', None) is None or self.active_trajectory.size == 0:
             self.logger.warning("Ejecución denegada. No existe matriz de trayectoria cargada en memoria.")
             return False
-
-        self.logger.debug("Delegando envio de trayectoria al TrajectoryStreamer.")
         
-        # Copia de seguridad para evitar modificaciones de memoria cache
-        # Nx4
+        # Validacion de Return-To-Home (RTH)
+        if not self._validate_rth(self.active_trajectory):
+            return False
+
+        # Transformacion cinematica desde espacio cinemático a espacio de servos
         hardware_trajectory = np.copy(self.active_trajectory)
 
         try:
-            # Extraer todas las filas y las primeras tres columnas
-            # Separa posiciones articulares (q1, q2, q3) del estado del actuador
             q_kin_matrix = hardware_trajectory[:, :3]
-                
-            # Invocamos la transformación inversa (Ajusta el nombre del método según tu clase)
-            q_servo_matrix = self.robot.map_kinematic_trajectory_to_servos(q_kin_matrix)
-                
-            # Reinyectamos los valores  traducidos en la matriz de hardware
-            # Sigue siendo Nx4
+            q_servo_matrix = self.robot.map_kinematic_trajectory_to_servos(q_kin_matrix)  
+            # Reinyectamos los valores transformados
             hardware_trajectory[:, :3] = q_servo_matrix
 
         except Exception as e:
