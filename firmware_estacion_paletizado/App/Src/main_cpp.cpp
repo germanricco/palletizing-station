@@ -45,7 +45,8 @@ Servo servo_base(&TIM3->CCR1,
                  Config::SERVO_BASE_MIN_PULSE_US,
                  Config::SERVO_BASE_MAX_PULSE_US,
                  Config::SERVO_BASE_HOME_ANGLE,
-                 Config::SERVO_BASE_MAX_SPEED);
+                 Config::SERVO_BASE_MAX_SPEED,
+                 Config::SERVO_BASE_ACCEL_DIVISOR);
 
 Servo servo_hombro(&TIM3->CCR2,
 				 Config::SERVO_HOMBRO_MIN_ANGLE,
@@ -53,7 +54,8 @@ Servo servo_hombro(&TIM3->CCR2,
 		         Config::SERVO_HOMBRO_MIN_PULSE_US,
 		         Config::SERVO_HOMBRO_MAX_PULSE_US,
 		         Config::SERVO_HOMBRO_HOME_ANGLE,
-		         Config::SERVO_HOMBRO_MAX_SPEED);
+		         Config::SERVO_HOMBRO_MAX_SPEED,
+		         Config::SERVO_HOMBRO_ACCEL_DIVISOR);
 
 Servo servo_codo(&TIM3->CCR3,
 				 Config::SERVO_CODO_MIN_ANGLE,
@@ -61,7 +63,8 @@ Servo servo_codo(&TIM3->CCR3,
                  Config::SERVO_CODO_MIN_PULSE_US,
                  Config::SERVO_CODO_MAX_PULSE_US,
 		         Config::SERVO_CODO_HOME_ANGLE,
-		         Config::SERVO_CODO_MAX_SPEED);
+		         Config::SERVO_CODO_MAX_SPEED,
+		         Config::SERVO_CODO_ACCEL_DIVISOR);
 
 
 // MotorDC

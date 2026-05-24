@@ -13,7 +13,7 @@
 Servo::Servo(volatile uint32_t* ccr_register,
 		float minAngle, float maxAngle,
 		float minPulseUs, float maxPulseUs,
-		float homeAngle, float maxSpeed)
+		float homeAngle, float maxSpeed, int32_t accelDivisor)
     : _ccr_reg(ccr_register),
 	  _minAngle(minAngle),
 	  _controlMode(ServoControlMode::SmoothPosition)
@@ -31,7 +31,7 @@ Servo::Servo(volatile uint32_t* ccr_register,
     _maxSpeed_Q16 = static_cast<int32_t>(maxSpeed * Q16_FACTOR);
 
 	// Configuracion parametrica de la inercia del software
-	_acceleration_Q16 = _maxSpeed_Q16 / 10;
+	_acceleration_Q16 = _maxSpeed_Q16 / accelDivisor;
 
 	// El sistema asume el estado de reposo inicial
 	_currentCCR_Q16 = _homePulse_Q16;
@@ -156,10 +156,15 @@ void Servo::update() {
             if (_currentVelocity_Q16 < safe_target_velocity) _currentVelocity_Q16 = safe_target_velocity;
         }
 
-        // Actualizacion de Estado (Con Hard Clamp)
-        int64_t next_ccr = static_cast<int64_t>(_currentCCR_Q16) + _currentVelocity_Q16;
+        // Anti-Stutter (Corte de Creeping). 
+        // Si la intención del joystick es 0, y la inercia bajó a un nivel crítico, CLAVAR LOS FRENOS.
+        int32_t absVelocity = (_currentVelocity_Q16 < 0) ? -_currentVelocity_Q16 : _currentVelocity_Q16;
+        if (safe_target_velocity == 0 && absVelocity < MIN_PHYSICAL_VELOCITY_Q16) {
+            _currentVelocity_Q16 = 0; 
+        }
 
-        // El Hard Clamp es vital para evitar desbordes en caso de comandos extremos
+        // Actualizacion de Estado (Con Hard Clamp, vital para evitar desbordes en caso de comandos extremos)
+        int64_t next_ccr = static_cast<int64_t>(_currentCCR_Q16) + _currentVelocity_Q16;
         if (next_ccr > _maxPulse_Q16) {
             _currentCCR_Q16 = _maxPulse_Q16;
             _currentVelocity_Q16 = 0; // Purgamos la inercia instantáneamente
@@ -201,10 +206,7 @@ void Servo::update() {
                 desired_velocity = (error_Q16 > 0) ? _maxSpeed_Q16 : -_maxSpeed_Q16;
             }
 
-            // Zona de Aterrizaje suave (Anti-Chattering)
-            // Actua como controlador P/4 que actua solo si la velocidad 
-            // pedida por el Bang-Bang nos haria pasarnos del objetivo.
-            int32_t safe_velocity = error_Q16 / 4;
+            int32_t safe_velocity = error_Q16 / 16;
 
             // Aplicamos el límite seguro manteniendo la intención direccional
             if (desired_velocity > 0 && desired_velocity > safe_velocity && safe_velocity > 0) {
@@ -224,7 +226,7 @@ void Servo::update() {
 
             // Empuje residual para vencer friccion estatica (Deadband)
             if (_currentVelocity_Q16 == 0 && desired_velocity != 0) {
-                 _currentVelocity_Q16 = (error_Q16 > 0) ? 13107 : -13107; 
+                 _currentVelocity_Q16 = (error_Q16 > 0) ? MIN_PHYSICAL_VELOCITY_Q16 : -MIN_PHYSICAL_VELOCITY_Q16;
             }
 
             _currentCCR_Q16 += _currentVelocity_Q16;

@@ -24,7 +24,8 @@ namespace Config {
 	constexpr float SERVO_BASE_HOME_ANGLE = 90.0f;
 	constexpr float SERVO_BASE_MIN_PULSE_US = 500.0f;
 	constexpr float SERVO_BASE_MAX_PULSE_US = 2500.0f;
-	constexpr float SERVO_BASE_MAX_SPEED = 20.0f;
+	constexpr float SERVO_BASE_MAX_SPEED = 16.0f;
+	constexpr int32_t SERVO_BASE_ACCEL_DIVISOR = 12;
 
 	// Articulacion 2: Hombro
 	constexpr float SERVO_HOMBRO_MIN_ANGLE = 40.0f;
@@ -32,7 +33,8 @@ namespace Config {
 	constexpr float SERVO_HOMBRO_HOME_ANGLE = 80.0f;
 	constexpr float SERVO_HOMBRO_MIN_PULSE_US = 500.0f;
 	constexpr float SERVO_HOMBRO_MAX_PULSE_US = 2500.0f;
-	constexpr float SERVO_HOMBRO_MAX_SPEED = 10.0f;
+	constexpr float SERVO_HOMBRO_MAX_SPEED = 8.0f;
+	constexpr int32_t SERVO_HOMBRO_ACCEL_DIVISOR = 16;
 
 	// Articulacion 3: Codo
 	constexpr float SERVO_CODO_MIN_ANGLE = 45.0f;
@@ -40,7 +42,8 @@ namespace Config {
 	constexpr float SERVO_CODO_HOME_ANGLE = 90.0f;
 	constexpr float SERVO_CODO_MIN_PULSE_US = 500.0f;
 	constexpr float SERVO_CODO_MAX_PULSE_US = 2500.0f;
-	constexpr float SERVO_CODO_MAX_SPEED = 15.0f;
+	constexpr float SERVO_CODO_MAX_SPEED = 10.0f;
+	constexpr int32_t SERVO_CODO_ACCEL_DIVISOR = 8;
 
 	// Actuador
 

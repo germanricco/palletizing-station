@@ -46,8 +46,9 @@ private:
     // Constantes matemáticas internas
     static constexpr float Q16_FACTOR = 65536.0f;
     static constexpr uint32_t Q16_HALF_STEP = 32768U; 
-    static constexpr int32_t DEADBAND_Q16 = 32768; // 0.5 us aprox
-
+    static constexpr int32_t DEADBAND_Q16 = 262144; // 4.0 us (Realidad del MG996R)
+    static constexpr int32_t MIN_PHYSICAL_VELOCITY_Q16 = 131072; // 2.0 us/ciclo
+    
     /**
      * @brief Método interno para convertir grados físicos a pulsos Q16
      */
@@ -63,12 +64,13 @@ public:
      * @param maxPulseUs Ancho de pulso en microsegundos correspondiente al ángulo máximo.
      * @param homeAngle Posición de reposo de la articulación.
      * @param maxSpeed Incremento máximo de posición por actualización.
+     * @param accelDivisor Divisor de aceleracion para diferencias en la inercia
      */
     Servo(volatile uint32_t* ccr_register,
     		float minAngle, float maxAngle,
             float minPulseUs, float maxPulseUs,
 			float homeAngle,
-			float maxSpeed);
+			float maxSpeed, int32_t accelDivisor = 10);
 
     /**
      * @brief Inicializa el sistema y posiciona el actuador de forma segura.
