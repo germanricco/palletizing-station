@@ -42,7 +42,6 @@ private:
 	float _alpha;						/**< Valor de filtro (entre 0.0 y 1.0) */
 	float _estado_filtrado_x;
 	float _estado_filtrado_y;
-	float _niveles_resolucion;
 
 	// Constantes Pre-calculadas (inversos multiplicativos para evitar divisiones en punto flotante)
 	float _k_pos_x;
@@ -51,7 +50,8 @@ private:
 	float _k_neg_y;
 	float _k_deadzone;
 	float _k_EMA_comp;
-	float _k_niveles;
+
+	float _curvatura;
 
 	/**
 	 * @brief Recalcula los inversos multiplicativos internos.
@@ -118,11 +118,11 @@ public:
 	 */
 	void setFiltroAlpha(float alpha);
 
+	
 	/**
-	 * @brief Define la cantidad de niveles discretos de velocidad.
-	 * @param niveles Ej. 10.0f creará saltos de 0.1, 0.2, 0.3...
+	 * @brief Modifica la curvatura de la respuesta del joystick
 	 */
-	 void setNivelesResolucion(float niveles);
+	void setCurvatura(float curvatura);
 };
 
 #endif /* JOYSTICK_HPP */

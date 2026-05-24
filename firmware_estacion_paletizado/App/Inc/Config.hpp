@@ -32,7 +32,7 @@ namespace Config {
 	constexpr float SERVO_HOMBRO_HOME_ANGLE = 80.0f;
 	constexpr float SERVO_HOMBRO_MIN_PULSE_US = 500.0f;
 	constexpr float SERVO_HOMBRO_MAX_PULSE_US = 2500.0f;
-	constexpr float SERVO_HOMBRO_MAX_SPEED = 6.0f;
+	constexpr float SERVO_HOMBRO_MAX_SPEED = 10.0f;
 
 	// Articulacion 3: Codo
 	constexpr float SERVO_CODO_MIN_ANGLE = 45.0f;
@@ -40,7 +40,7 @@ namespace Config {
 	constexpr float SERVO_CODO_HOME_ANGLE = 90.0f;
 	constexpr float SERVO_CODO_MIN_PULSE_US = 500.0f;
 	constexpr float SERVO_CODO_MAX_PULSE_US = 2500.0f;
-	constexpr float SERVO_CODO_MAX_SPEED = 12.0f;
+	constexpr float SERVO_CODO_MAX_SPEED = 15.0f;
 
 	// Actuador
 
@@ -51,16 +51,15 @@ namespace Config {
 
 	// Parametros de procesamiento digital de senales (DSP)
 	constexpr float JOYSTICK_DEADZONE = 0.05f;        // 5% de zona muerta central
-	constexpr float JOYSTICK_EMA_ALPHA = 0.8f;        // Factor de filtro de promedio móvil (Suavizado)
+	constexpr float JOYSTICK_EMA_ALPHA = 0.3f;        // Factor de filtro de promedio móvil (Suavizado)
 
-	//! ========== CORREGIR  !! ===========
-	constexpr float JOYSTICK_RESOLUTION_STEPS = 10.0f;// Discretización a 10 niveles de velocidad
+	constexpr float JOYSTICK_CURVATURE = 0.0f;
 
 	// Valores de reposo (Centro) calibrados estáticamente
-	constexpr float JOYSTICK_IZQUIERDO_X_CENTER = 1900.0f;
-	constexpr float JOYSTICK_IZQUIERDO_Y_CENTER = 1900.0f;
-	constexpr float JOYSTICK_DERECHO_X_CENTER = 1900.0f;
-	constexpr float JOYSTICK_DERECHO_Y_CENTER = 1900.0f;
+	constexpr float JOYSTICK_IZQUIERDO_X_CENTER = 1958.0f;
+	constexpr float JOYSTICK_IZQUIERDO_Y_CENTER = 1991.0f;
+	constexpr float JOYSTICK_DERECHO_X_CENTER = 2000.0f;
+	constexpr float JOYSTICK_DERECHO_Y_CENTER = 2000.0f;
 } // namespace Config
 
 #endif	/* CONFIG_HPP */

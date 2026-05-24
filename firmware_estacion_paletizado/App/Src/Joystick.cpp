@@ -13,11 +13,11 @@ Joystick::Joystick(volatile uint32_t* direccion_memoria_x, volatile uint32_t* di
 	  puerto_sw(puerto_sw_asignado), pin_sw(pin_sw_asignado),
 	  valor_x(0.0f), valor_y(0.0f), raw_x(0), raw_y(0),
 	  centro_x(calibracion_centro_x), centro_y(calibracion_centro_y),
-	  zona_muerta(umbral_zona_muerta),
+	  zona_muerta(Config::JOYSTICK_DEADZONE),
 	  tiempo_inicio_debounce(0), en_proceso_debounce(false),
 	  _alpha(Config::JOYSTICK_EMA_ALPHA),
 	  _estado_filtrado_x(0.0f), _estado_filtrado_y(0.0f),
-	  _niveles_resolucion(Config::JOYSTICK_RESOLUTION_STEPS) {
+	  _curvatura(Config::JOYSTICK_CURVATURE) {
 
 	// Ejecucion del pre-calculo para evitar divisiones en tiempo de ejecucion
 	CalcularMultiplicadores();
@@ -35,7 +35,6 @@ void Joystick::CalcularMultiplicadores() {
     // Filtros y Espacialidad
     _k_deadzone = 1.0f / (1.0f - zona_muerta);
     _k_EMA_comp = 1.0f - _alpha;
-    _k_niveles = 1.0f / _niveles_resolucion;
 }
 
 float Joystick::ProcesarLectura(uint32_t valor_adc, float centro, float k_pos, float k_neg, float& estado_previo) {
@@ -57,17 +56,17 @@ float Joystick::ProcesarLectura(uint32_t valor_adc, float centro, float k_pos, f
     	target = (N + zona_muerta) * _k_deadzone;
     }
 
-    // 4. Filtro EMA
+    // 4. Mapeo No Lineal (Interpolar entre respuesta lineal y cúbica)
+    if (target != 0.0f) {
+        float cubo = target * target * target;
+        target = (1.0f - _curvatura) * target + _curvatura * cubo;
+    }
+
+    // 5. Filtro EMA
     estado_previo = (_alpha * target) + (_k_EMA_comp * estado_previo);
 
-    // 5. Cuantizacion de velocidad (reemplazo de std::round por desplazamiento y casting)
-    float producto_niveles = estado_previo * _niveles_resolucion;
-    int truncamiento = static_cast<int>(producto_niveles >= 0.0f ?
-    		(producto_niveles + 0.5f) :
-			(producto_niveles - 0.5f));
-
-    // Retorno al dominio [-1.0f, 1.0f]
-    return static_cast<float>(truncamiento) * _k_niveles;
+    // Retorno continuo al dominio [-1.0f, 1.0f]
+    return estado_previo;
 }
 
 void Joystick::Actualizar() {
@@ -115,9 +114,7 @@ void Joystick::setFiltroAlpha(float alpha) {
     _k_EMA_comp = 1.0f - _alpha; // Actualización del parámetro correlacionado
 }
 
-void Joystick::setNivelesResolucion(float niveles) {
-    if (niveles >= 1.0f) {
-        _niveles_resolucion = niveles;
-        _k_niveles = 1.0f / _niveles_resolucion; // Actualización del parámetro correlacionado
-    }
+void Joystick::setCurvatura(float curvatura) {
+    // Limitar la curvatura entre 0.0 (puramente lineal) y 1.0 (puramente cúbica)
+    _curvatura = (curvatura < 0.0f) ? 0.0f : ((curvatura > 1.0f) ? 1.0f : curvatura);
 }

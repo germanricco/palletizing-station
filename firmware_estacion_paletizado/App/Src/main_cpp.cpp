@@ -156,7 +156,7 @@ void Cpp_Main_Loop(void) {
      * RUTINA DE PRUEBA: PERFIL DE VELOCIDAD MOTOR CINTA
      */
     // Ciclo de prueba de 12000 ms (12 segundos)
-    uint32_t tiempo_ciclo = tiempo_actual % 12000;
+    /*uint32_t tiempo_ciclo = tiempo_actual % 12000;
     float velocidad_prueba = 0.0f;
 
     if (tiempo_ciclo < 1000) {
@@ -184,7 +184,7 @@ void Cpp_Main_Loop(void) {
         velocidad_motor_cinta = 0.0f;
     }
 
-    motor_cinta.setSpeed(velocidad_motor_cinta);
+    motor_cinta.setSpeed(velocidad_motor_cinta);*/
     // ===================================================================================
 
     stationController.update(tiempo_actual);
