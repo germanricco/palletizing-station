@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         """)
         self.progress_bar.setValue(0)
         self.progress_bar.hide()
+        self._last_progress_color = None
 
         dt_layout.addWidget(self.digital_twin_widget, stretch=1)
         dt_layout.addWidget(self.progress_bar)
@@ -163,12 +164,15 @@ class MainWindow(QMainWindow):
             self.progress_bar.show()
             self.progress_bar.setValue(progress)
 
-            # Cambiar color si es ejecución real vs simulación
+            # Cambiar color si es ejecución real vs simulación (solo si realmente cambio: evita
+            # reaplicar el mismo QSS en cada tick de telemetria mientras la barra esta activa).
             color = "#34C759" if state_name == "AUTO_RUNNING" else "#00F0FF"
-            self.progress_bar.setStyleSheet(f"""
-                QProgressBar {{ background-color: #1A1A1A; border: none; }}
-                QProgressBar::chunk {{ background-color: {color}; }}
-            """)
+            if color != self._last_progress_color:
+                self._last_progress_color = color
+                self.progress_bar.setStyleSheet(f"""
+                    QProgressBar {{ background-color: #1A1A1A; border: none; }}
+                    QProgressBar::chunk {{ background-color: {color}; }}
+                """)
         else:
             self.progress_bar.hide()
             self.progress_bar.setValue(0)

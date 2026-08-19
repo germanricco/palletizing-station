@@ -49,7 +49,11 @@ class DigitalTwin(QWidget):
         self.setObjectName("DigitalTwinCanvas")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"background-color: {AppConfig.COLORS.BACKGROUND};")
-        
+
+        # Firma del ultimo estado de HUD aplicado, para no reaplicar setStyleSheet en cada
+        # frame de telemetria si (state_name, actuator_active) no cambiaron (ver _update_hud_status).
+        self._last_hud_signature = None
+
         # Capa 0: Layout de fondo exclusivo
         self.bg_layout = QVBoxLayout(self)
         self.bg_layout.setContentsMargins(0, 0, 0, 0)
@@ -237,6 +241,12 @@ class DigitalTwin(QWidget):
         """
         Actualiza el panel izquierdo (Modo de la máquina y actuador final unificado).
         """
+        # Evitar reaplicar estilos si nada cambio desde el ultimo frame procesado.
+        signature = (state_name, actuator_active)
+        if signature == self._last_hud_signature:
+            return
+        self._last_hud_signature = signature
+
         # 1. Mapeo de colores semánticos
         color_map = {
             "INIT": AppConfig.COLORS.TEXT_MED,

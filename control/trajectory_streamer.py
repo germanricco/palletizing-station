@@ -121,10 +121,12 @@ class TrajectoryStreamer:
         Motor de transmision principal.
         Maneja slicing eficiente, inyeccion de actuadores y formato G-Code
         """
-        # Condicion de Fin de Trayectoria
+        # Condicion de Fin de Trayectoria: M116 le indica al firmware que no llegaran mas
+        # puntos, para que drene la FIFO restante y transicione solo a AutoReady (via
+        # EVT:AUTO_COMPLETE) en vez de tratarlo como una pausa real (M113).
         if self.current_index >= self.total_points:
-            self.logger.info("Trayectoria finalizada exitosamente. Transmitiendo 'M113' (EOF).")
-            self.comm.send_message("M113")
+            self.logger.info("Trayectoria finalizada exitosamente. Transmitiendo 'M116' (EOF).")
+            self.comm.send_message("M116")
             self.state = StreamState.IDLE
             self._report_progress(100)
             return

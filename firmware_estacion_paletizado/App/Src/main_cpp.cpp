@@ -132,26 +132,26 @@ void Cpp_Main_Init(void) {
 
 // ==== LOOP PRINCIPAL DEL SISTEMA ====
 void Cpp_Main_Loop(void) {
-	// Actualizacion de entradas
-    joystick_izquierdo.Actualizar();
-    joystick_derecho.Actualizar();
+    const uint32_t tiempo_actual = HAL_GetTick();
+
+	// Actualizacion de entradas: el joystick se muestrea/filtra a tasa fija para que el filtro EMA interno tenga una frecuencia de corte determinista.
+    static uint32_t tiempoUltimaMuestraJoystick = 0U;
+    if ((tiempo_actual - tiempoUltimaMuestraJoystick) >= Config::JOYSTICK_SAMPLE_PERIOD_MS) {
+        tiempoUltimaMuestraJoystick += Config::JOYSTICK_SAMPLE_PERIOD_MS;
+
+        joystick_izquierdo.Actualizar();
+        joystick_derecho.Actualizar();
+    }
 
     terminal.update();
 
-    const uint32_t tiempo_actual = HAL_GetTick();
-
     bool cambio_sensor_fin_cinta = sensor_fin_cinta.update(tiempo_actual);
 
-    if (cambio_sensor_fin_cinta)
+    // Flanco de deteccion: notificamos al orquestador de la PC via protocolo estructurado
+    // (antes solo se logueaba localmente, invisible para la maquina de estados de la PC).
+    if (cambio_sensor_fin_cinta && sensor_fin_cinta.objetoDetectado())
     {
-        if (sensor_fin_cinta.objetoDetectado())
-        {
-            Logger::logINFO("SENSOR IR: Objeto detectado al final de la cinta.");
-        }
-        else
-        {
-            Logger::logINFO("SENSOR IR: Fin de cinta libre.");
-        }
+        terminal.enviarNormal("EVT:SENSOR\r\n");
     }
 
     // ===================================================================================

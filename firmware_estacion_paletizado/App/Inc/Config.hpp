@@ -39,7 +39,7 @@ namespace Config {
 	// Articulacion 3: Codo
 	constexpr float SERVO_CODO_MIN_ANGLE = 45.0f;
 	constexpr float SERVO_CODO_MAX_ANGLE = 180.0f;
-	constexpr float SERVO_CODO_HOME_ANGLE = 90.0f;
+	constexpr float SERVO_CODO_HOME_ANGLE = 100.0f;
 	constexpr float SERVO_CODO_MIN_PULSE_US = 500.0f;
 	constexpr float SERVO_CODO_MAX_PULSE_US = 2500.0f;
 	constexpr float SERVO_CODO_MAX_SPEED = 10.0f;
@@ -54,7 +54,17 @@ namespace Config {
 
 	// Parametros de procesamiento digital de senales (DSP)
 	constexpr float JOYSTICK_DEADZONE = 0.05f;        // 5% de zona muerta central
-	constexpr float JOYSTICK_EMA_ALPHA = 0.3f;        // Factor de filtro de promedio móvil (Suavizado)
+
+	// Tasa fija de muestreo/filtrado del joystick. Se fija a
+	// 100 Hz: el doble del tick de actuacion del servo (50 Hz / 20 ms, ver TIM3), cumpliendo
+	// Nyquist con margen respecto al consumidor de la consigna de velocidad.
+	constexpr uint32_t JOYSTICK_SAMPLE_PERIOD_MS = 10U;
+
+	// Factor de filtro EMA (Suavizado). Con Ts = JOYSTICK_SAMPLE_PERIOD_MS fijo, la constante de
+	// tiempo del filtro queda definida por alpha = 1 - exp(-Ts/tau). Con Ts = 10 ms este valor
+	// corresponde a tau ~= 30 ms (fc ~= 1/(2*pi*tau) ~= 5.3 Hz), similar al suavizado original
+	// pero ahora con una frecuencia de corte determinista.
+	constexpr float JOYSTICK_EMA_ALPHA = 0.28f;
 
 	constexpr float JOYSTICK_CURVATURE = 0.0f;
 

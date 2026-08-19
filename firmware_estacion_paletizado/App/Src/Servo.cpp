@@ -31,6 +31,7 @@ Servo::Servo(volatile uint32_t* ccr_register,
     _maxSpeed_Q16 = static_cast<int32_t>(maxSpeed * Q16_FACTOR);
 
 	// Configuracion parametrica de la inercia del software
+	_accelDivisor = accelDivisor;
 	_acceleration_Q16 = _maxSpeed_Q16 / accelDivisor;
 
 	// El sistema asume el estado de reposo inicial
@@ -206,7 +207,7 @@ void Servo::update() {
                 desired_velocity = (error_Q16 > 0) ? _maxSpeed_Q16 : -_maxSpeed_Q16;
             }
 
-            int32_t safe_velocity = error_Q16 / 16;
+            int32_t safe_velocity = error_Q16 / POSITION_GAIN_DIVISOR;
 
             // Aplicamos el límite seguro manteniendo la intención direccional
             if (desired_velocity > 0 && desired_velocity > safe_velocity && safe_velocity > 0) {
@@ -251,7 +252,7 @@ void Servo::update() {
 void Servo::setMaxSpeed(float newMaxSpeed) {
     if (newMaxSpeed > 0.01f) {
     	_maxSpeed_Q16 = static_cast<int32_t>(newMaxSpeed * Q16_FACTOR);
-    	_acceleration_Q16 = _maxSpeed_Q16 / 10;
+    	_acceleration_Q16 = _maxSpeed_Q16 / _accelDivisor;
     }
 }
 
@@ -274,6 +275,6 @@ bool Servo::isTargetReached() const {
     int32_t error_Q16 = _targetPulse_Q16 - _currentCCR_Q16;
     int32_t absError_Q16 = (error_Q16 < 0) ? -error_Q16 : error_Q16;
 
-    // Si el error es menor o igual a la banda muerta (0.5 us), llegamos.
+    // Si el error es menor o igual a la banda muerta (4.0 us, ver DEADBAND_Q16), llegamos.
     return (absError_Q16 <= DEADBAND_Q16);
 }

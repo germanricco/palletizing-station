@@ -54,8 +54,9 @@ enum class UartCommand {
     M110_StartRecording,	/**< Inicia el streaming de telemetría para guardado. */
     M111_StopRecording,		/**< Finaliza el guardado y retorna a Manual. */
     M112_StartPlayback,		/**< Inicia el consumo de la FIFO de trayectoria. */
-    M113_StopPausePlayback,	/**< Pausa la ejecución de la trayectoria. */
+    M113_StopPausePlayback,	/**< Pausa la ejecución (desde AutoRunning) o cancela (desde AutoPaused). */
     M114_ResumePlayback,	/**< Reanuda la trayectoria pausada. */
+    M116_EndOfTrajectory,	/**< Marca que no llegarán más puntos: drenar FIFO y pasar a AutoReady al vaciarse. */
     M00_EStop,				/**< Parada de emergencia. Corta potencia inmediatamente. */
 
     Status					/**< Solicita el estado actual de la FSM. */
@@ -164,6 +165,9 @@ private:
     uint8_t _autoFifoCount;
 
     bool _chunkRequestPending;
+    bool _endOfTrajectoryPending;			/**< true tras M116: drenar FIFO restante y pasar a AutoReady al vaciarse. */
+
+    bool _homingActive;					/**< true mientras dura el regreso a Home disparado por el pulsador izquierdo (Manual/Recording). */
 
     // Control de Metrónomo Estricto 50Hz
     uint32_t _lastTrajectoryTick;

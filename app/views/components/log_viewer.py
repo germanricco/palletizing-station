@@ -33,6 +33,9 @@ class LogViewer(QWidget):
         # --- Área de Texto de Logs ---
         self.text_area = QPlainTextEdit()
         self.text_area.setReadOnly(True)
+        # Acota el documento a las ultimas 1000 lineas: sin este limite, appendHtml() en una
+        # sesion larga hace crecer el documento sin cota, encareciendo cada nuevo append.
+        self.text_area.setMaximumBlockCount(1000)
         self.text_area.setStyleSheet(
             f"QPlainTextEdit {{"
             f"  background-color: #0A0A0A;"

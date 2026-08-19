@@ -4,6 +4,8 @@ Adapta Matplotlib como un widget nativo de PySide6 para visualizar
 la cinemática del robot en tiempo real.
 """
 
+import time
+
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -77,6 +79,12 @@ class WireframeCanvas(FigureCanvasQTAgg):
         # Ajuste de márgenes internos para maximizar área de dibujo
         self.fig.tight_layout()
 
+        # El redibujado 3D (draw_idle) es, por lejos, la operacion mas cara de todo el
+        # dashboard (Axes3D no soporta blitting como el 2D). Se throttlea de forma independiente
+        # a la tasa de telemetria/UI (20Hz) para no cargar el hilo de la GUI innecesariamente.
+        self._last_draw_time = 0.0
+        self._min_draw_interval = 1.0 / 15.0  # cap a ~15Hz
+
         # Inyectar Posición "Home" por defecto para que se vea el brazo
         # al arrancar la UI (Matriz de 6 eslabones x 3 coordenadas X, Y, Z)
         default_home_state = np.array([
@@ -144,6 +152,13 @@ class WireframeCanvas(FigureCanvasQTAgg):
 
         self._update_wireframe(frame_state)
         self._update_joints(frame_state)
+
+        # Throttle del repintado real: los datos de arriba ya quedaron actualizados (son baratos,
+        # solo reemplazan arrays chicos), pero el redibujado en si (draw_idle) se limita aparte.
+        now = time.monotonic()
+        if (now - self._last_draw_time) < self._min_draw_interval:
+            return
+        self._last_draw_time = now
 
         # Refresco asíncrono optimizado para integración en Event Loop de Qt
         self.draw_idle()

@@ -78,6 +78,10 @@ class ControlPanel(QWidget):
 
         self._actuator_is_on = False  # Estado de los actuadores (para lógica de botones)
 
+        # Firma del ultimo render aplicado en update_machine_state, para no reaplicar estilos
+        # cuando nada relevante cambio desde la llamada anterior (ver update_machine_state).
+        self._last_render_signature = None
+
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -493,10 +497,21 @@ class ControlPanel(QWidget):
     def update_machine_state(self, current_state, progress: int = 0, is_recipe_mode: bool = False) -> None:
         """
         Actualiza el diseño visual del Segmented Control para reflejar el estado actual.
-        Llamado asíncronamente cuando llega nueva telemetría.
+        Llamado asíncronamente cuando llega nueva telemetría (hasta ~20-50 veces/seg).
         """
-        self._apply_inactive_styles() # Reset general
         state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
+        current_label_text = self.lbl_loaded_file.text()
+        has_file_loaded = current_label_text != "ARCHIVO: [ NINGUNO ]"
+
+        # Firma de todo lo que influye en el resultado visual de este metodo. Si nada de esto
+        # cambio desde la ultima llamada, evitamos recalcular y reaplicar decenas de
+        # setStyleSheet() en cada tick de telemetria (el costo real del "parpadeo"/lentitud de UI).
+        signature = (state_name, progress > 0, is_recipe_mode, has_file_loaded)
+        if signature == self._last_render_signature:
+            return
+        self._last_render_signature = signature
+
+        self._apply_inactive_styles() # Reset general
 
         # Estilo activo base (Inversión de contraste sin borde)
         active_style = (
@@ -522,10 +537,7 @@ class ControlPanel(QWidget):
             self.stack_record.setCurrentIndex(0)
 
         # 2. LÓGICA DE GESTIÓN DE MEMORIA (CARGA Y DESCARGA)
-        # Evaluamos si hay algo cargado leyendo la etiqueta de estado
-        current_label_text = self.lbl_loaded_file.text()
-        has_file_loaded = current_label_text != "ARCHIVO: [ NINGUNO ]"
-        
+        # (has_file_loaded ya se calculo arriba, junto con la firma de render)
         # Si hay archivo, mostramos "LIMPIAR MEMORIA" (1), sino "CARGAR" (0)
         self.stack_load.setCurrentIndex(1 if has_file_loaded else 0)
         
@@ -553,32 +565,7 @@ class ControlPanel(QWidget):
             
                 # Activamos el boton correspondiente
                 self._set_button_enabled(self.stack_execute.currentWidget(), True)
-            
-        # 4. LÓGICA DE BLOQUEO DE TELEOPERACIÓN
-        is_manual = (state_name == "MANUAL")
-        
-        # Bloquear/Habilitar tarjetas de ejes (+ / -)
-        for card in getattr(self, 'cards', []):
-            card.setEnabled(is_manual)
-            
-        # Bloquear/Habilitar botón de Modo Articular/Cartesiano
-        if hasattr(self, 'btn_jog_mode'):
-            self.btn_jog_mode.setEnabled(is_manual)
-            
-        # Bloquear/Habilitar botón del Actuador Final
-        if hasattr(self, 'btn_actuator'):
-            self.btn_actuator.setEnabled(is_manual)
-            
-            # Feedback visual extra para el actuador cuando está bloqueado
-            if not is_manual:
-                self.btn_actuator.setStyleSheet(
-                    f"background-color: #1A1A1A; color: #555555; border: none; border-radius: 4px;"
-                    f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; font-size: 12px;"
-                )
-            else:
-                # Si entramos a MANUAL, restauramos su color normal (Encendido o Apagado)
-                self._update_actuator_button_style()
-        
+
         elif state_name == "AUTO_WAITING_SENSOR":
             # El sistema está armado y esperando la caja
             self.stack_abort.setCurrentIndex(0)
@@ -590,18 +577,46 @@ class ControlPanel(QWidget):
             self.stack_abort.setCurrentIndex(0)
             self.stack_execute.setCurrentIndex(1)   # PAUSAR
             self._set_button_enabled(self.btn_simulate, False)
-            
+
         elif state_name == "AUTO_PAUSED":
             # Pausado. Aparece CANCELAR y REANUDAR.
             self.stack_abort.setCurrentIndex(2)     # CANCELAR
             self.stack_execute.setCurrentIndex(2)   # REANUDAR
-            
+
         else:
             # Cualquier otro estado (IDLE, MANUAL, RECORDING). Todo bloqueado.
             self.stack_abort.setCurrentIndex(0)
             self.stack_execute.setCurrentIndex(0)
             self._set_button_enabled(self.btn_simulate, False)
             self._set_button_enabled(self.btn_execute, False)
+
+        # 4. LÓGICA DE BLOQUEO DE TELEOPERACIÓN
+        # (Movido fuera de la cadena if/elif de arriba: es independiente del ramo de ejecucion/
+        # simulacion/palletizado y antes quedaba "colgado" del branch de AUTO_READY, dejando sin
+        # efecto los casos AUTO_WAITING_SENSOR/AUTO_RUNNING/AUTO_PAUSED de arriba en la practica.)
+        is_manual = (state_name == "MANUAL")
+
+        # Bloquear/Habilitar tarjetas de ejes (+ / -)
+        for card in getattr(self, 'cards', []):
+            card.setEnabled(is_manual)
+
+        # Bloquear/Habilitar botón de Modo Articular/Cartesiano
+        if hasattr(self, 'btn_jog_mode'):
+            self.btn_jog_mode.setEnabled(is_manual)
+
+        # Bloquear/Habilitar botón del Actuador Final
+        if hasattr(self, 'btn_actuator'):
+            self.btn_actuator.setEnabled(is_manual)
+
+            # Feedback visual extra para el actuador cuando está bloqueado
+            if not is_manual:
+                self.btn_actuator.setStyleSheet(
+                    f"background-color: #1A1A1A; color: #555555; border: none; border-radius: 4px;"
+                    f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; font-size: 12px;"
+                )
+            else:
+                # Si entramos a MANUAL, restauramos su color normal (Encendido o Apagado)
+                self._update_actuator_button_style()
 
     def set_connection_state(self, is_connected: bool) -> None:
         """

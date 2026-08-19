@@ -6,6 +6,8 @@ Ensambla el controlador del hardware con la interfaz gráfica de usuario.
 
 import sys
 import logging
+import queue
+from logging.handlers import QueueHandler, QueueListener
 from PySide6.QtWidgets import QApplication
 
 # Importaciones de los módulos del proyecto
@@ -34,19 +36,34 @@ def main():
     # 1. Inicializar la aplicación Qt
     app = QApplication(sys.argv)
 
-    # Configuracion de Logging centralizada
-    logging.basicConfig(
-        level=logging.INFO,
-        format="[%(asctime)s] | [%(levelname)s] | [%(module)s] | %(message)s",
-        datefmt="%H:%M:%S"
-    )
+    # Configuracion de Logging centralizada.
+    # La consola (stderr) usa un StreamHandler estandar, que hace write()+flush() SINCRONO en
+    # el hilo que llama a logger.X(...). Si la terminal que la muestra (ej. la integrada de
+    # VSCode) no puede seguir el ritmo de renderizado, ese write() se bloquea y con el bloquea
+    # el hilo llamador (GUI o RX) — con nivel DEBUG y trafico continuo esto es exactamente el
+    # tipo de estancamiento que se observo. Se delega la escritura real a un hilo dedicado via
+    # QueueListener, y se baja el nivel de consola a INFO (el detalle DEBUG sigue disponible en
+    # el archivo de log y en el visor de la GUI).
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter(
+        "[%(asctime)s] | [%(levelname)s] | [%(module)s] | %(message)s", datefmt="%H:%M:%S"
+    ))
 
-    # 2. Configurar el puente de Qt y añadirlo al root logger
+    log_queue: "queue.Queue" = queue.Queue(-1)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(QueueHandler(log_queue))
+
+    console_listener = QueueListener(log_queue, console_handler, respect_handler_level=True)
+    console_listener.start()
+
+    # 2. Configurar el puente de Qt y añadirlo al root logger.
+    # QtLogHandler.emit() no hace I/O bloqueante (solo emite una señal Qt: encolada si se llama
+    # desde otro hilo, directa pero barata si se llama desde el propio hilo de la GUI), asi que
+    # no necesita pasar por la cola de arriba.
     qt_logger = QtLogHandler()
     qt_logger.setFormatter(logging.Formatter('%(message)s'))
-    
-    # Interceptamos todos los logs desde el nivel raíz y los enviamos a Qt
-    root_logger = logging.getLogger()
     root_logger.addHandler(qt_logger)
 
     logging.info("Inicializando Robot Control GUI...")

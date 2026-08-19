@@ -50,6 +50,10 @@ class RobotController:
         self.recording_buffer: List[List[float]] = []   # Buffer dinamico en RAM para modo RECORDING
         self._pending_save_matrix: Optional[np.ndarray] = None  # Cache para posponer el guardado de trayectoria
 
+        # Ultimo progreso conocido de trayectoria/simulacion. Se propaga tambien en los frames de
+        # telemetria pura (ver _handle_telemetry) para no pisarlo con 0 en cada uno de ellos.
+        self._current_progress: int = 0
+
         # Gestor de Recetas (Palletizado)
         self.active_recipe: List[str] = []      # Lista de archivos de trayectorias en orden
         self.current_recipe_step: int = 0       # Indice de la caja actual (0 = Caja A)
@@ -189,7 +193,7 @@ class RobotController:
             # Extraccion y Validacion estructural de Trama
             partes = data_str.split(',')
             if len(partes) != 4: return
-            
+
             s1_deg, s2_deg, s3_deg = float(partes[0]), float(partes[1]), float(partes[2])
             is_actuator_on = bool(int(partes[3]))
 
@@ -202,17 +206,23 @@ class RobotController:
             self.actuator_active = is_actuator_on
             kin_array = self.robot.get_angular_state()
 
-            # Persistencia en Memoria (Modo RECORDING)
+            # Persistencia en Memoria (Modo RECORDING). El regreso a Home (disparado por el
+            # joystick izquierdo en firmware) se graba como parte normal de la trayectoria, sin
+            # ningun tratamiento especial aca: es justamente lo que permite cerrar la trayectoria
+            # grabada en el mismo punto en que arranco.
             if self.current_state == SystemState.RECORDING:
                 self.recording_buffer.append([kin_array[0], kin_array[1], kin_array[2], float(is_actuator_on)])
 
             # Propagacion de telemetria hacia la UI (Observer Pattern)
+            # Se propaga el ultimo progreso conocido (no 0 a secas) para no pisar el valor real
+            # reportado por el streamer y disparar un falso "cambio critico" en cada frame.
             if self.ui_update_callback is not None:
                 self.ui_update_callback(
                     self.robot.get_cartesian_state(),
                     np.rad2deg(kin_array).tolist(),
                     self.current_state,
-                    self.actuator_active
+                    self.actuator_active,
+                    self._current_progress
                 )
             
         except ValueError as ve:
@@ -241,17 +251,56 @@ class RobotController:
                 self.execute_auto()
             else:
                 self.logger.debug("EVT:SENSOR ignorado. Sistema no esta en ciclo de espera.")
-        
+
+        elif event_msg == "AUTO_COMPLETE":
+            # El firmware termino de drenar la FIFO tras confirmar M116 (fin de envio) y
+            # transiciono solo AUTO_RUNNING -> AUTO_READY. Esta notificacion es asincrona
+            # (no responde a un comando puntual de la PC), por eso llega como evento y no como ACK.
+            self.logger.info("Firmware confirmo finalizacion de trayectoria (EVT:AUTO_COMPLETE).")
+
+            if self.current_state != SystemState.AUTO_RUNNING:
+                self.logger.debug("EVT:AUTO_COMPLETE ignorado. Sistema no esta en AUTO_RUNNING.")
+            elif len(self.active_recipe) > 0:
+                self.logger.debug("Segmento de palletizado concluido. Avanzando receta...")
+                self._advance_recipe()
+            else:
+                self._change_internal_state(SystemState.AUTO_READY)
+
         else:
             self.logger.warning(f"Evento de hardware no reconocido: {event_msg}")
 
     def _handle_state_ack(self, ack_msg: str) -> None:
         """
-        Mapea los codigos de confirmacion del STM32 a la enumeracion 
-        
+        Mapea los codigos de confirmacion del STM32 a la enumeracion
+
         Parametros:
             ack_msg: Codigo de confirmacion de comando
         """
+        # ACKs que son válidos pero no alteran la máquina de estados.
+        # ACK_M116 no cambia de estado aca: la transicion real (AUTO_RUNNING -> AUTO_READY)
+        # llega despues, de forma asincrona, como EVT:AUTO_COMPLETE (ver _handle_async_event),
+        # porque el firmware puede tardar en drenar la FIFO restante antes de completar.
+        ignored_state_acks = ["ACK_M3", "ACK_M5", "ACK_M116"]
+        if ack_msg in ignored_state_acks:
+            return
+
+        # ACK_M113 es ambiguo por diseño en el firmware: el mismo codigo confirma tanto una
+        # pausa real (AUTO_RUNNING -> AUTO_PAUSED) como una cancelacion (AUTO_PAUSED ->
+        # AUTO_READY). El texto del ACK no distingue el caso, asi que usamos el estado actual
+        # (el mismo que ya validamos como guarda antes de despachar el comando) para desambiguar.
+        if ack_msg == "ACK_M113":
+            if self.current_state == SystemState.AUTO_RUNNING:
+                new_state = SystemState.AUTO_PAUSED
+            elif self.current_state == SystemState.AUTO_PAUSED:
+                new_state = SystemState.AUTO_READY
+            else:
+                self.logger.warning(f"ACK_M113 recibido en estado inesperado: {self.current_state.value}.")
+                return
+
+            self.logger.debug(f"Confirmacion recibida: {ack_msg}. Sincronizando estado.")
+            self._change_internal_state(new_state)
+            return
+
         mapping = {
             "ACK_M98": SystemState.INIT,
             "ACK_M99": SystemState.IDLE,
@@ -260,30 +309,14 @@ class RobotController:
             "ACK_M110": SystemState.RECORDING,       # Inicio de grabacion
             "ACK_M111": SystemState.MANUAL,          # Fin de grabacion
             "ACK_M112": SystemState.AUTO_RUNNING,    # Inicio de trayectoria
-            "ACK_M113": SystemState.AUTO_READY,      # Fin o cancelacion de trayectoria
-            "ACK_M114": SystemState.AUTO_PAUSED,     # Pausa de trayectoria
-            "ACK_M115": SystemState.AUTO_RUNNING     # Reanudacion de trajectoria
+            "ACK_M114": SystemState.AUTO_RUNNING,    # Reanudacion de trayectoria
         }
-
-        # ACKs que son válidos pero no alteran la máquina de estados
-        ignored_state_acks = ["ACK_M3", "ACK_M5"]
-        if ack_msg in ignored_state_acks:
-            return
 
         new_state = mapping.get(ack_msg)
 
         if new_state:
             self.logger.debug(f"Confirmacion recibida: {ack_msg}. Sincronizando estado.")
-            
-            # Intercepcion para estacion de Palletizado
-            if ack_msg == "ACK_M113" and self.current_state == SystemState.AUTO_RUNNING:
-                if len(self.active_recipe) > 0:
-                    self.logger.debug("Segmento de palletizado concluido. Avanzando receta...")
-                    self._advance_recipe()
-                    return
-                
             self._change_internal_state(new_state)
-
         else:
             self.logger.warning(f"ACK no reconocido: {ack_msg}.")
 
@@ -336,6 +369,12 @@ class RobotController:
 
             self.streamer.reset()
 
+        elif new_state == SystemState.AUTO_READY:
+            # El progreso de una ejecucion/simulacion anterior no debe persistir al volver a
+            # AUTO_READY (por ej. tras cancelar o completar una trayectoria): si quedara en un
+            # valor > 0, la UI lo interpreta como "simulando" (ver is_simulating en main_window).
+            self._current_progress = 0
+
         # Cambio de estado efectivo
         self.current_state = new_state
         self.logger.info(f"Sistema en modo: {self.current_state.value}.")
@@ -365,15 +404,16 @@ class RobotController:
             return True
         
         # Intercepcion de maquina de estados
+        # Nota: M113 es ambiguo por diseño en el firmware (pausa desde AUTO_RUNNING, o
+        # cancela desde AUTO_PAUSED), asi que se resuelve segun el estado actual.
         state_commands_map = {
             "M99": self.request_idle_state,
             "M100": self.request_manual_mode,
             "M101": self.request_auto_ready,
             "M110": self.start_recording,
             "M111": self.stop_recording,
-            "M113": self.cancel_trajectory,
-            "M114": self.stop_trajectory,
-            "M115": self.resume_trajectory
+            "M113": self._dispatch_pause_or_cancel,
+            "M114": self.resume_trajectory,
         }
 
         if base_cmd in state_commands_map:
@@ -760,9 +800,9 @@ class RobotController:
         if self.current_state != SystemState.AUTO_RUNNING:
             self.logger.warning(f"No se puede pausar: El sistema no esta en ejecucion.")
             return False
-        
-        return self._dispatch_command("M114", "Feed Hold / Pause")
-    
+
+        return self._dispatch_command("M113", "Feed Hold / Pause")
+
     def resume_trajectory(self) -> bool:
         """
         Solicita reanudar la ejecucion desde el punto exacto de interrupcion.
@@ -771,7 +811,7 @@ class RobotController:
             self.logger.warning(f"No se puede reanudar: El sistema no esta pausado.")
             return False
 
-        return self._dispatch_command("M115", "Resume Trajectory")
+        return self._dispatch_command("M114", "Resume Trajectory")
     
     def cancel_trajectory(self) -> bool:
         """
@@ -782,8 +822,22 @@ class RobotController:
             return False
         
         return self._dispatch_command("M113", "Cancel Trajectory")
-    
-    
+
+    def _dispatch_pause_or_cancel(self) -> bool:
+        """
+        Resuelve el comando manual 'M113' segun el estado actual, ya que el firmware
+        reutiliza el mismo codigo para pausar (desde AUTO_RUNNING) o cancelar (desde
+        AUTO_PAUSED). Uso exclusivo del enrutador de comandos de texto libre.
+        """
+        if self.current_state == SystemState.AUTO_RUNNING:
+            return self.stop_trajectory()
+        if self.current_state == SystemState.AUTO_PAUSED:
+            return self.cancel_trajectory()
+
+        self.logger.warning(f"Transicion M113 denegada. Incompatibilidad de estado.")
+        return False
+
+
     # ==== CONTROL DE HERRAMIENTA ====
     def toggle_actuator(self) -> bool:
         """
@@ -955,6 +1009,7 @@ class RobotController:
 
     # ==== METODOS AUXILIARES ====
     def _on_streamer_progress(self, progress: int) -> None:
+        self._current_progress = progress
         if self.ui_update_callback:
             self.ui_update_callback(
                 self.robot.get_cartesian_state(),

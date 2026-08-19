@@ -54,6 +54,13 @@ class RobotGUIApp:
         self._last_telemetry_time = 0.0
         self._ui_refresh_rate = 1.0 / 20.0  # 20FPS
 
+        # Contrapresion real: mientras haya una actualizacion ya encolada/en ejecucion en el
+        # hilo de la GUI, no encolamos otra de telemetria rutinaria. Sin esto, un frame lento
+        # ocasional (GC, hiccup del SO, etc.) hace crecer la cola de eventos Qt sin limite,
+        # porque la telemetria de 50Hz nunca deja de llegar mientras haya conexion — el atraso
+        # queda permanentemente pegado y se nota como lag general (hasta en el hover de botones).
+        self._gui_update_pending = False
+
         # Memoria de Estados Criticos
         self._last_state_name = ""
         self._last_progress = 0
@@ -89,7 +96,7 @@ class RobotGUIApp:
         # --- Flujos de Alta Frecuencia (Backend -> UI) ---
         # Telemetria y Cinematica
         self.controller.ui_update_callback = self._on_backend_telemetry_update
-        self.bridge.telemetry_received.connect(self.window.update_dashboard)
+        self.bridge.telemetry_received.connect(self._on_dashboard_update)
 
         # Eventos Discretos de Memoria
         self.controller.trajectory_loaded_callback = self._on_trajectory_loaded
@@ -146,29 +153,48 @@ class RobotGUIApp:
     # ==== METODOS PUENTE (THREAD-SAFE WRAPPERS) ====
     def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_active: bool, progress=0) -> None:
         """
-        Invocado por el hilo RX del AsyncUARTCommunicator. 
+        Invocado por el hilo RX del AsyncUARTCommunicator.
         Cruza la barrera de hilos emitiendo la señal Qt.
         """
         now = time.time()
         state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
-        
-        # Evaluacion de Bypass
+
+        # Evaluacion de Bypass: los cambios criticos (transicion de estado, actuador, inicio/fin
+        # de progreso) siempre se emiten de inmediato, nunca se descartan por contrapresion.
         is_critical_change = (
-            (state_name != self._last_state_name) or 
+            (state_name != self._last_state_name) or
             (actuator_active != self._last_actuator_state) or
-            (progress == 0 and self._last_progress > 0) or 
+            (progress == 0 and self._last_progress > 0) or
             (progress > 0 and self._last_progress == 0)
         )
-        
-        # Puerta Logica
-        if is_critical_change or (now - self._last_telemetry_time) >= self._ui_refresh_rate:
-            self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_active, progress)
-            
-            # Actualizamos la memoria interna
-            self._last_telemetry_time = now
-            self._last_state_name = state_name
-            self._last_progress = progress
-            self._last_actuator_state = actuator_active
+
+        if not is_critical_change:
+            # Telemetria rutinaria. Contrapresion: si la GUI todavia no termino de procesar la
+            # ultima actualizacion encolada, este frame se descarta (no se acumula) en vez de
+            # apilarse en la cola de eventos de Qt.
+            if self._gui_update_pending:
+                return
+            if (now - self._last_telemetry_time) < self._ui_refresh_rate:
+                return
+
+        self._gui_update_pending = True
+        self.bridge.telemetry_received.emit(cartesian_state, joints, current_state, actuator_active, progress)
+
+        # Actualizamos la memoria interna
+        self._last_telemetry_time = now
+        self._last_state_name = state_name
+        self._last_progress = progress
+        self._last_actuator_state = actuator_active
+
+    def _on_dashboard_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_active: bool, progress: int) -> None:
+        """
+        Slot real (hilo de la GUI) conectado a la señal de telemetría. Ejecuta la actualización
+        visual y recién ahí libera la contrapresión, para que el próximo frame pueda encolarse.
+        """
+        try:
+            self.window.update_dashboard(cartesian_state, joints, current_state, actuator_active, progress)
+        finally:
+            self._gui_update_pending = False
 
     def _on_trajectory_loaded(self, payload: dict) -> None:
         """

@@ -39,7 +39,9 @@ namespace Station {
  *   AutoReady --M99-->  Idle
  *   AutoReady --M98-->  Init
  *
- *   AutoRunning --M113--> AutoPaused
+ *   AutoRunning --M113--> AutoPaused          (pausa real, iniciada por el usuario)
+ *   AutoRunning --M116--> AutoRunning         (marca _endOfTrajectoryPending; no cambia de estado)
+ *   AutoRunning --(FIFO vacia y EOF pendiente)--> AutoReady   (finalizacion automatica, ver onUpdateAutoRunning)
  *   AutoRunning --M99-->  Idle
  *
  *   AutoPaused --M114--> AutoRunning
@@ -50,6 +52,18 @@ namespace Station {
  *   Cualquier estado --M00--> Emergency
  *
  * En estados Fault y Emergency se bloquean comandos normales.
+ *
+ * HOMING BAJO DEMANDA (sub-estado interno, no un GlobalState):
+ *   Disponible en Manual y Recording (donde corre procesarTeleoperacion()). El pulsador
+ *   izquierdo del joystick (libre en teleoperacion) dispara goHome() en los 3 servos y
+ *   BLOQUEA por completo la teleoperacion por joystick (ejes y pulsador de actuador) hasta que
+ *   los 3 servos reporten isTargetReached() -- sin cancelacion por movimiento del joystick,
+ *   porque presionar el click del stick casi siempre genera algo de deflexion residual, y eso
+ *   cancelaba el Homing apenas arrancaba.
+ *   Se mantiene deliberadamente FUERA de la maquina de GlobalState (no es un estado nuevo): la
+ *   telemetria (T:J1,J2,J3,A1) sigue enviandose sin ningun cambio de formato durante el regreso
+ *   a Home, y RECORDING sigue capturandola sin interrupcion -- es literalmente el punto de la
+ *   funcionalidad (cerrar la trayectoria grabada en el mismo punto en que arranco).
  * ================================================================
  */
 
@@ -79,6 +93,8 @@ Controller::Controller(TerminalSerial& terminal,
       _autoFifoTail(0U),
       _autoFifoCount(0U),
       _chunkRequestPending(false),
+      _endOfTrajectoryPending(false),
+      _homingActive(false),
 	  _lastTrajectoryTick(0U) {
 }
 
@@ -193,6 +209,7 @@ const char* Controller::toString(UartCommand command) {
         case UartCommand::M112_StartPlayback:     return "M112";
         case UartCommand::M113_StopPausePlayback: return "M113";
         case UartCommand::M114_ResumePlayback:    return "M114";
+        case UartCommand::M116_EndOfTrajectory:   return "M116";
         case UartCommand::M00_EStop:              return "M00";
         case UartCommand::Status:                 return "STATUS";
         default:                                  return "Unknown";
@@ -230,6 +247,7 @@ UartCommand Controller::parseUartCommand(const char* text) {
     if (std::strcmp(cmd, "M112") == 0)   return UartCommand::M112_StartPlayback;
     if (std::strcmp(cmd, "M113") == 0)   return UartCommand::M113_StopPausePlayback;
     if (std::strcmp(cmd, "M114") == 0)   return UartCommand::M114_ResumePlayback;
+    if (std::strcmp(cmd, "M116") == 0)   return UartCommand::M116_EndOfTrajectory;
     if (std::strcmp(cmd, "M00") == 0)    return UartCommand::M00_EStop;
     if (std::strcmp(cmd, "STATUS") == 0) return UartCommand::Status;
 
@@ -288,6 +306,7 @@ void Controller::clearAutoFifo(void) {
 void Controller::clearAutoRuntimeState(void) {
     clearAutoFifo();
     _chunkRequestPending = false;
+    _endOfTrajectoryPending = false;
     _lastTrajectoryTick = 0U;
 }
 
@@ -507,6 +526,14 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
                 transitionTo(GlobalState::AutoPaused, nowMs);
                 return makeAck("ACK_M113");
             }
+            if (command == UartCommand::M116_EndOfTrajectory) {
+                // No hay mas puntos en camino: no cambiamos de estado todavia, solo dejamos de
+                // pedir chunks y drenamos la FIFO restante. La transicion a AutoReady es automatica
+                // (ver onUpdateAutoRunning) una vez que la FIFO se vacie.
+                _endOfTrajectoryPending = true;
+                Logger::logDEBUG("AUTO_RUNNING: EOF marcado. Drenando FIFO restante...");
+                return makeAck("ACK_M116");
+            }
             if (command == UartCommand::M99_GoIdle) {
                 transitionTo(GlobalState::Idle, nowMs);
                 return makeAck("ACK_M99");
@@ -575,6 +602,7 @@ void Controller::detenerActuadoresManuales(void) {
     _servoBase.setTargetVelocity(0.0f);
     _servoHombro.setTargetVelocity(0.0f);
     _servoCodo.setTargetVelocity(0.0f);
+    _homingActive = false;
 }
 
 void Controller::realizarServoInitInicial(void) {
@@ -620,13 +648,44 @@ void Controller::enviarEstadoActualPorUart(void) {
 
 
 void Controller::procesarTeleoperacion(void) {
+    // Ambos pulsadores se evaluan siempre (una vez por tick cada uno) para consumir
+    // correctamente su FSM de antirrebote, independientemente de si en este momento se
+    // actua sobre el resultado o no (ver bloqueo total durante Homing, mas abajo).
+    const bool pulsadorIzquierdoValido = _joystickIzquierdo.HayPulsacionValida();
+    const bool pulsadorDerechoValido = _joystickDerecho.HayPulsacionValida();
+
+    // Disparo de Homing: pulsador izquierdo (libre en teleoperacion) inicia el regreso a Home.
+    // Necesario para que una trayectoria grabada manualmente pueda cerrar en el mismo punto en
+    // que arranco (Return-To-Home), algo impracticable a mano con precision via joystick.
+    if (!_homingActive && pulsadorIzquierdoValido) {
+        Logger::logDEBUG("TELEOPERACION: Homing solicitado por pulsador izquierdo.");
+        _servoBase.goHome();
+        _servoHombro.goHome();
+        _servoCodo.goHome();
+        _homingActive = true;
+    }
+
+    if (_homingActive) {
+        // Bloqueo total de la teleoperacion (ejes Y pulsador de actuador) mientras dura el
+        // Homing, sin cancelacion por movimiento: presionar el click del joystick casi siempre
+        // genera algo de deflexion residual del propio stick, y con el loop principal corriendo
+        // sin limite de velocidad, una cancelacion "por movimiento" abortaba el Homing apenas
+        // arrancaba (en la misma fraccion de milisegundo, antes de mover nada). Se sale de este
+        // sub-estado unicamente cuando los 3 servos reportan isTargetReached().
+        if (_servoBase.isTargetReached() && _servoHombro.isTargetReached() && _servoCodo.isTargetReached()) {
+            Logger::logDEBUG("TELEOPERACION: Homing completado.");
+            _homingActive = false;
+        }
+        return;
+    }
+
     // 1. Actualizar Motores pasando comando de velocidad
     _servoBase.setTargetVelocity(_joystickIzquierdo.ObtenerX());
     _servoHombro.setTargetVelocity(_joystickIzquierdo.ObtenerY());
     _servoCodo.setTargetVelocity(_joystickDerecho.ObtenerY());
 
     // 2. Actualizar Actuador si hay pulsación
-    if (_joystickDerecho.HayPulsacionValida()) {
+    if (pulsadorDerechoValido) {
         Logger::logDEBUG("TELEOPERACION: pulsador derecho accionado.");
         HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_1); // Feedback visual
 
@@ -760,12 +819,21 @@ void Controller::onUpdateAutoRunning(void) {
 
             // B. Actuador (Corregido con timestamp)
             gestionarActuadorAuto(currentPoint.a1, nowMs);
+        } else if (_endOfTrajectoryPending) {
+            // FIFO vacia y confirmado que no llegaran mas puntos (M116): trayectoria completa.
+            Logger::logDEBUG("AUTO_RUNNING: FIFO vacia con EOF confirmado. Trayectoria completa.");
+            transitionTo(GlobalState::AutoReady, nowMs);
+            _terminal.enviarNormal("EVT:AUTO_COMPLETE\r\n");
+            return;
         }
-        // Si hay Underflow (FIFO vacía), ignoramos silenciosamente y el brazo mantiene su posición.
+        // Underflow sin EOF pendiente: pueden llegar mas puntos, ignoramos silenciosamente y el
+        // brazo mantiene su posición.
     }
 
-    // Evaluación en background
-    requestNextChunkIfNeeded();
+    // Evaluación en background. Sin sentido pedir mas chunks si ya sabemos que no llegaran.
+    if (!_endOfTrajectoryPending) {
+        requestNextChunkIfNeeded();
+    }
 }
 
 void Controller::onUpdateAutoPaused(void) {}

@@ -34,20 +34,26 @@ private:
     int32_t _homePulse_Q16;					/**< Pulso correspondiente a la posicion de calibracion inicial */
     int32_t _maxSpeed_Q16;					/**< Magnitud maxima de incremento por pulso por ciclo */
     int32_t _acceleration_Q16;				/**< Tasa maxima de aceleracion/desaceleracion */
+    int32_t _accelDivisor;					/**< Divisor calibrado usado para derivar _acceleration_Q16 desde _maxSpeed_Q16 */
 
     // Variables de Estado Dinamico
-	int32_t _currentCCR_Q16;				/**< Representacion continua de coma flotante de la posicion actual */
-    int32_t _targetVelocity_Q16;			/**< Velocidad dictada */
-    int32_t _currentVelocity_Q16;			/**< Velocidad filtrada/suavizada a inyectar al hardware */
-    int32_t _targetPulse_Q16;				/**< Posicion objetiva requerida (utilizada en modo Position) */
+    // NOTA: los siguientes campos se escriben desde contexto main-loop (setters) y se leen/escriben
+    // desde la ISR de TIM3 (update()). El acceso a enteros de 32 bits alineados es atomico en
+    // Cortex-M3, pero se marcan 'volatile' para evitar que el compilador cachee/reordene estos
+    // valores a traves de la frontera main/ISR (evita UB de carrera de datos formal en C++).
+	volatile int32_t _currentCCR_Q16;			/**< Representacion continua de coma flotante de la posicion actual */
+    volatile int32_t _targetVelocity_Q16;		/**< Velocidad dictada */
+    volatile int32_t _currentVelocity_Q16;		/**< Velocidad filtrada/suavizada a inyectar al hardware */
+    volatile int32_t _targetPulse_Q16;			/**< Posicion objetiva requerida (utilizada en modo Position) */
 
-    ServoControlMode _controlMode;			/**< Maquina de estados para bifurcacion del control */
+    volatile ServoControlMode _controlMode;	/**< Maquina de estados para bifurcacion del control */
 
     // Constantes matemáticas internas
     static constexpr float Q16_FACTOR = 65536.0f;
     static constexpr uint32_t Q16_HALF_STEP = 32768U; 
     static constexpr int32_t DEADBAND_Q16 = 262144; // 4.0 us (Realidad del MG996R)
     static constexpr int32_t MIN_PHYSICAL_VELOCITY_Q16 = 131072; // 2.0 us/ciclo
+    static constexpr int32_t POSITION_GAIN_DIVISOR = 16; // Ganancia proporcional (error/N) de aproximacion final en SmoothPosition
     
     /**
      * @brief Método interno para convertir grados físicos a pulsos Q16
