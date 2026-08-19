@@ -146,9 +146,9 @@ class RobotGUIApp:
         safety = self.window.safety_panel_widget
         safety.request_e_stop.connect(self.controller.trigger_emergency_stop)
 
-        # Reinicio
-        #! safety.request_e_reset.connect(self.controller.reset_emergency)
-        
+        # Reinicio (salida controlada de FAULT/EMERGENCY, ver RobotController.reset_fault)
+        safety.request_e_reset.connect(self.controller.reset_fault)
+
 
     # ==== METODOS PUENTE (THREAD-SAFE WRAPPERS) ====
     def _on_backend_telemetry_update(self, cartesian_state: np.ndarray, joints: list[float], current_state: Any, actuator_active: bool, progress=0) -> None:

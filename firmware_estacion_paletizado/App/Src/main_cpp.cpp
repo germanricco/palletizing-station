@@ -126,7 +126,7 @@ void Cpp_Main_Init(void) {
 
     // Mensaje Inicial
     terminal.enviarNormal(
-        "PROTO: M100 M101 M110 M111 M112 M113 M114 M99 M00 STATUS\r\n");
+        "PROTO: M98 M99 M100 M101 M110 M111 M112 M113 M114 M116 M999 M00 STATUS\r\n");
 }
 
 

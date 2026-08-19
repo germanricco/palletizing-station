@@ -5,8 +5,14 @@ y control de reinicio del sistema.
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QSizePolicy
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from app.core.constants import AppConfig
+
+# Tiempo que el boton queda deshabilitado apenas se entra a FAULT/EMERGENCY: mitigacion del
+# "click reflejo" (un operador que aprieta panico y, por costumbre, vuelve a apretar el mismo
+# lugar de la pantalla -- ahora reetiquetado RESET SYSTEM -- sin haber evaluado la escena real).
+# Complementa (no reemplaza) la ventana minima de permanencia que ya exige el firmware (M999).
+RESET_DEBOUNCE_MS = 1500
 
 
 class SafetyPanel(QWidget):
@@ -96,15 +102,21 @@ class SafetyPanel(QWidget):
 
     def update_safety_status(self, state_name: str) -> None:
         """
-        Alterna la visualización del botón dependiendo si la máquina 
-        reporta estado de emergencia.
+        Alterna la visualización del botón dependiendo si la máquina
+        reporta estado de emergencia o de falla (ambos requieren el mismo
+        botón de reset controlado, ver reset_fault en RobotController).
         """
-        is_emg = (state_name == "EMERGENCY")
-        
+        is_emg = state_name in ("EMERGENCY", "FAULT")
+
         # Solo repintar si el estado ha cambiado
         if is_emg != self._is_emergency:
             self._is_emergency = is_emg
             if is_emg:
                 self._apply_emergency_style()
+                # Debounce visual: el boton queda inhabilitado un momento apenas aparece
+                # RESET SYSTEM, para no aceptar un click reflejo en el mismo lugar de pantalla.
+                self.btn_estop.setEnabled(False)
+                QTimer.singleShot(RESET_DEBOUNCE_MS, lambda: self.btn_estop.setEnabled(True))
             else:
                 self._apply_normal_style()
+                self.btn_estop.setEnabled(True)

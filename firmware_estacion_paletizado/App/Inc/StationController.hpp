@@ -57,6 +57,7 @@ enum class UartCommand {
     M113_StopPausePlayback,	/**< Pausa la ejecución (desde AutoRunning) o cancela (desde AutoPaused). */
     M114_ResumePlayback,	/**< Reanuda la trayectoria pausada. */
     M116_EndOfTrajectory,	/**< Marca que no llegarán más puntos: drenar FIFO y pasar a AutoReady al vaciarse. */
+    M999_ResetError,		/**< Salida controlada de Fault/Emergency. Solo valido desde esos dos estados. */
     M00_EStop,				/**< Parada de emergencia. Corta potencia inmediatamente. */
 
     Status					/**< Solicita el estado actual de la FSM. */
@@ -158,6 +159,9 @@ private:
      * MEMORIA DINÁMICA: BUFFER CIRCULAR PARA TRAYECTORIAS (AUTO)
      * ==================================================================== */
     static constexpr uint8_t AUTO_FIFO_CAPACITY = 64U;
+    static constexpr uint32_t AUTO_FIFO_STARVATION_TIMEOUT_MS = 3000U;	/**< Sin datos nuevos por este lapso en AutoRunning (sin EOF) -> Fault. */
+    static constexpr uint32_t M999_MIN_DWELL_MS = 1000U;					/**< Ventana minima en Fault/Emergency antes de aceptar M999 (anti-reflejo). */
+    static constexpr uint32_t CHUNK_REQUEST_TIMEOUT_MS = 500U;			/**< Libera _chunkRequestPending por tiempo si nunca cruza el watermark superior (chunk final chico). */
     PendingAutoCommand _autoFifo[AUTO_FIFO_CAPACITY];
 
     uint8_t _autoFifoHead;
@@ -165,12 +169,14 @@ private:
     uint8_t _autoFifoCount;
 
     bool _chunkRequestPending;
+    uint32_t _chunkRequestTick;			/**< Tick en que se envio el ultimo REQ_CHUNK (ver CHUNK_REQUEST_TIMEOUT_MS). */
     bool _endOfTrajectoryPending;			/**< true tras M116: drenar FIFO restante y pasar a AutoReady al vaciarse. */
 
     bool _homingActive;					/**< true mientras dura el regreso a Home disparado por el pulsador izquierdo (Manual/Recording). */
 
     // Control de Metrónomo Estricto 50Hz
     uint32_t _lastTrajectoryTick;
+    uint32_t _lastFifoDataTick;			/**< Ultimo tick en que se desencolo un punto real (ver AUTO_FIFO_STARVATION_TIMEOUT_MS). */
 
     // Metodos Utilitarios
     static const char* toString(GlobalState state);

@@ -51,7 +51,18 @@ namespace Station {
  * Prioridad absoluta:
  *   Cualquier estado --M00--> Emergency
  *
- * En estados Fault y Emergency se bloquean comandos normales.
+ * En estados Fault y Emergency se bloquean comandos normales, con una unica excepcion:
+ *
+ *   Fault --M999--> Init
+ *   Emergency --M999--> Init
+ *
+ * M999 = salida controlada (ver IEC 60204-1 / ISO 13850: un reset nunca debe por si solo
+ * reanudar movimiento). Requiere una ventana minima de permanencia (M999_MIN_DWELL_MS) y
+ * siempre aterriza en Init (pasivo), nunca en Idle (que homea al entrar) ni en un modo
+ * operativo -- el operador debe re-navegar la FSM explicitamente (M99, luego modo) para
+ * retomar. Fault hoy tiene un disparador real: timeout de FIFO en AutoRunning sin M116
+ * (ver AUTO_FIFO_STARVATION_TIMEOUT_MS en onUpdateAutoRunning), ademas de forceFault()
+ * disponible para futuros disparadores.
  *
  * HOMING BAJO DEMANDA (sub-estado interno, no un GlobalState):
  *   Disponible en Manual y Recording (donde corre procesarTeleoperacion()). El pulsador
@@ -93,9 +104,11 @@ Controller::Controller(TerminalSerial& terminal,
       _autoFifoTail(0U),
       _autoFifoCount(0U),
       _chunkRequestPending(false),
+      _chunkRequestTick(0U),
       _endOfTrajectoryPending(false),
       _homingActive(false),
-	  _lastTrajectoryTick(0U) {
+	  _lastTrajectoryTick(0U),
+	  _lastFifoDataTick(0U) {
 }
 
 
@@ -210,6 +223,7 @@ const char* Controller::toString(UartCommand command) {
         case UartCommand::M113_StopPausePlayback: return "M113";
         case UartCommand::M114_ResumePlayback:    return "M114";
         case UartCommand::M116_EndOfTrajectory:   return "M116";
+        case UartCommand::M999_ResetError:        return "M999";
         case UartCommand::M00_EStop:              return "M00";
         case UartCommand::Status:                 return "STATUS";
         default:                                  return "Unknown";
@@ -248,6 +262,7 @@ UartCommand Controller::parseUartCommand(const char* text) {
     if (std::strcmp(cmd, "M113") == 0)   return UartCommand::M113_StopPausePlayback;
     if (std::strcmp(cmd, "M114") == 0)   return UartCommand::M114_ResumePlayback;
     if (std::strcmp(cmd, "M116") == 0)   return UartCommand::M116_EndOfTrajectory;
+    if (std::strcmp(cmd, "M999") == 0)   return UartCommand::M999_ResetError;
     if (std::strcmp(cmd, "M00") == 0)    return UartCommand::M00_EStop;
     if (std::strcmp(cmd, "STATUS") == 0) return UartCommand::Status;
 
@@ -306,8 +321,10 @@ void Controller::clearAutoFifo(void) {
 void Controller::clearAutoRuntimeState(void) {
     clearAutoFifo();
     _chunkRequestPending = false;
+    _chunkRequestTick = 0U;
     _endOfTrajectoryPending = false;
     _lastTrajectoryTick = 0U;
+    _lastFifoDataTick = 0U;
 }
 
 bool Controller::enqueueAutoPoint(const PendingAutoCommand& cmd) {
@@ -329,11 +346,25 @@ bool Controller::dequeueAutoPoint(PendingAutoCommand& cmd) {
 void Controller::requestNextChunkIfNeeded(void) {
 	// Low Watermark (Histeresis Inferior)
     if (_autoFifoCount >= 16) return;
-    if (_chunkRequestPending) return;
+
+    if (_chunkRequestPending) {
+        // El watermark superior (24, ver onAutoRunningCommand) libera esta bandera cuando un
+        // chunk completo (32 puntos) la cruza sin problema. Pero el ULTIMO chunk de cualquier
+        // trayectoria (el resto de dividir el total por el tamaño de chunk) casi nunca es
+        // completo, y si es chico puede no cruzar nunca ese watermark -- dejando la bandera
+        // trabada para siempre y a la PC sin la oportunidad de responder con M116 (que solo
+        // se envia en respuesta a un REQ_CHUNK). Se libera tambien por tiempo como red de
+        // seguridad, para no depender de que la aritmetica de watermarks siempre alcance.
+        if ((HAL_GetTick() - _chunkRequestTick) < CHUNK_REQUEST_TIMEOUT_MS) {
+            return;
+        }
+        Logger::logDEBUG("AUTO_RUNNING: Solicitud de chunk anterior sin liberar por watermark. Reintentando.");
+    }
 
     Logger::logDEBUG("AUTO_RUNNING: FIFO baja. Enviado REQ_CHUNK.");
     _terminal.enviarNormal("REQ_CHUNK\r\n");
     _chunkRequestPending = true;
+    _chunkRequestTick = HAL_GetTick();
 }
 
 
@@ -438,6 +469,23 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
     if (command == UartCommand::M00_EStop) {
         transitionTo(GlobalState::Emergency, nowMs);
         return makeAck("ACK_M00");
+    }
+
+    if (command == UartCommand::M999_ResetError) {
+        // Salida controlada de Fault/Emergency. Se evalua con la misma prioridad que M00,
+        // ANTES del bloqueo incondicional de esos dos estados (si no, ese mismo bloqueo se
+        // comeria a M999). Solo valido viniendo de Fault/Emergency, y solo tras una ventana
+        // minima de permanencia (evita que un reflejo -- apretar el mismo boton fisico que
+        // ahora dice RESET -- limpie una falla real sin que nadie evaluo la escena).
+        const bool enEstadoDeFalla = (_state == GlobalState::Fault) || (_state == GlobalState::Emergency);
+        if (!enEstadoDeFalla) {
+            return makeErr("ERR:INVALID_STATE");
+        }
+        if ((nowMs - _stateEntryTick) < M999_MIN_DWELL_MS) {
+            return makeErr("ERR:RESET_TOO_SOON");
+        }
+        transitionTo(GlobalState::Init, nowMs);
+        return makeAck("ACK_M999");
     }
 
     if (command == UartCommand::Status) {
@@ -752,9 +800,11 @@ void Controller::onEnterAutoRunning(void) {
     if (_previousState != GlobalState::AutoPaused) {
         clearAutoRuntimeState();
         _lastTrajectoryTick = HAL_GetTick(); // Inicia el reloj principal
+        _lastFifoDataTick = HAL_GetTick();   // Arranca limpio el reloj de subalimentacion
         Logger::logDEBUG("AUTO_RUNNING: FIFO inicializada. Listo para solicitar 1er chunk...");
     } else {
     	_lastTrajectoryTick = HAL_GetTick(); // Resincroniza el reloj al despausar
+    	_lastFifoDataTick = HAL_GetTick();   // Idem: evita un falso timeout apenas se reanuda
         Logger::logDEBUG("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
     }
 }
@@ -767,6 +817,11 @@ void Controller::onEnterAutoPaused(void) {
 void Controller::onEnterFault(void) {
     Logger::logERROR("FSM -> Fault");
     detenerActuadoresManuales();
+
+    // Cortar energia a actuador final (simetrico con onEnterEmergency: cualquier estado de
+    // seguridad debe soltar/despresurizar por defecto, no mantener lo que tenia).
+    _efectorFinal.commandIdle();
+
     clearAutoRuntimeState();
     _terminal.enviarNormal("EVT:FAULT\r\n");
 }
@@ -808,6 +863,9 @@ void Controller::onUpdateAutoRunning(void) {
         PendingAutoCommand currentPoint{};
 
         if (dequeueAutoPoint(currentPoint)) {
+            // Datos reales fluyendo: refrescamos el reloj de subalimentacion.
+            _lastFifoDataTick = nowMs;
+
             // A. Cinemática
             float anguloGradosQ1 = currentPoint.q1 * 57.29578f;
             float anguloGradosQ2 = currentPoint.q2 * 57.29578f;
@@ -826,8 +884,14 @@ void Controller::onUpdateAutoRunning(void) {
             _terminal.enviarNormal("EVT:AUTO_COMPLETE\r\n");
             return;
         }
-        // Underflow sin EOF pendiente: pueden llegar mas puntos, ignoramos silenciosamente y el
-        // brazo mantiene su posición.
+        // Underflow sin EOF pendiente: pueden llegar mas puntos. Si la PC dejo de responder a
+        // REQ_CHUNK por demasiado tiempo (perdio la conexion, se colgo, etc.), esto ya no es
+        // una espera normal -- pasamos a Fault en vez de esperar en silencio indefinidamente.
+        else if ((nowMs - _lastFifoDataTick) >= AUTO_FIFO_STARVATION_TIMEOUT_MS) {
+            Logger::logERROR("AUTO_RUNNING: Timeout de FIFO. Posible perdida de comunicacion con la PC.");
+            forceFault(nowMs);
+            return;
+        }
     }
 
     // Evaluación en background. Sin sentido pedir mas chunks si ya sabemos que no llegaran.

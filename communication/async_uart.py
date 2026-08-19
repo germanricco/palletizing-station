@@ -61,6 +61,10 @@ class AsyncUARTCommunicator(ICommunication):
         # Callback único requerido por ICommunication
         self._rx_callback: Optional[Callable[[str], None]] = None
 
+        # Callback opcional para desconexiones NO deliberadas (excepcion en RX/TX), distinto
+        # de disconnect() que es una desconexion pedida explicitamente por el usuario.
+        self._disconnect_callback: Optional[Callable[[], None]] = None
+
     def connect(self) -> bool:
         """Abre el puerto serie y levanta los hilos daemon de trabajo."""
         try:
@@ -110,10 +114,28 @@ class AsyncUARTCommunicator(ICommunication):
 
     def set_rx_callback(self, callback: Callable[[str], None]) -> None:
         """
-        Registra la función de la capa superior (ej. TrajectoryStreamer) 
+        Registra la función de la capa superior (ej. TrajectoryStreamer)
         que será notificada cuando llegue un nuevo string.
         """
         self._rx_callback = callback
+
+    def set_disconnect_callback(self, callback: Callable[[], None]) -> None:
+        """
+        Registra la función notificada cuando el enlace se cae de forma NO deliberada
+        (excepcion en el hilo de RX o TX), a diferencia de disconnect() que es siempre
+        una desconexion pedida explicitamente por el usuario.
+        """
+        self._disconnect_callback = callback
+
+    def _notify_unexpected_disconnect(self) -> None:
+        """
+        Marca _running en False y dispara el callback de desconexion inesperada una única
+        vez, aunque RX y TX detecten la caida casi al mismo tiempo.
+        """
+        was_running = self._running
+        self._running = False
+        if was_running and self._disconnect_callback:
+            self._disconnect_callback()
 
     # ==========================================
     # Hilos de Trabajo Independientes (Workers)
@@ -132,7 +154,7 @@ class AsyncUARTCommunicator(ICommunication):
                 pass
             except serial.SerialException as e:
                 print(f"[UART Error] Excepción en escritura TX: {e}")
-                self._running = False
+                self._notify_unexpected_disconnect()
 
     def _rx_loop(self) -> None:
         """Escucha constantemente el puerto y dispara el callback al recibir datos."""
@@ -156,7 +178,7 @@ class AsyncUARTCommunicator(ICommunication):
                         
                 except serial.SerialException as e:
                     print(f"[UART Error] Excepción en lectura RX: {e}")
-                    self._running = False
+                    self._notify_unexpected_disconnect()
             else:
                 # Prevenir saturación de CPU si el puerto se cierra inesperadamente
                 time.sleep(0.01)

@@ -25,6 +25,24 @@ class SystemState(Enum):
     EMERGENCY = "EMERGENCY"
 
 
+# Mapeo de los nombres de estado tal como los serializa el firmware (Controller::toString en
+# StationController.cpp, usado en EVT:STATE,actual,previo) a los miembros de SystemState. Los
+# nombres no coinciden 1:1 por convencion de mayusculas/guiones bajos (ej. "AutoReady" en
+# firmware vs. SystemState.AUTO_READY aca).
+_FIRMWARE_STATE_NAMES = {
+    "Boot": SystemState.BOOT,
+    "Init": SystemState.INIT,
+    "Idle": SystemState.IDLE,
+    "Manual": SystemState.MANUAL,
+    "Recording": SystemState.RECORDING,
+    "AutoReady": SystemState.AUTO_READY,
+    "AutoRunning": SystemState.AUTO_RUNNING,
+    "AutoPaused": SystemState.AUTO_PAUSED,
+    "Fault": SystemState.FAULT,
+    "Emergency": SystemState.EMERGENCY,
+}
+
+
 class RobotController:
     """
     Controlador Maestro del sistema robotico.
@@ -67,8 +85,13 @@ class RobotController:
 
         self.actuator_active: bool = False
 
+        # Origen del bloqueo actual de FAULT/EMERGENCY ("FIRMWARE" o "LINK_LOST"). Determina
+        # como reset_fault() debe recuperarse (ver _enter_lockdown_state).
+        self._fault_source: Optional[str] = None
+
         # Callbacks
         self.uart.set_rx_callback(self._route_serial_message)
+        self.uart.set_disconnect_callback(self._on_unexpected_disconnect)
         self.streamer.progress_callback = self._on_streamer_progress
         self.ui_update_callback = None
         self.prompt_save_callback: Optional[Callable[[str], None]] = None
@@ -172,11 +195,17 @@ class RobotController:
                     self.logger.debug("ACK_M112 Recibido desde firmware. Notificando al Streamer.")
                     self.streamer.process_message(clean_msg)
             
-            # Interaccion con el Streamer 
+            # Interaccion con el Streamer
             elif clean_msg == "REQ_CHUNK":
                 self.logger.debug("REQ_CHUNK Recibido. Delegando al Streamer.")
                 self.streamer.process_message(clean_msg)
-            
+
+            # Rechazos del firmware (ej. ERR:RESET_TOO_SOON, ERR:INVALID_STATE). Sin este caso
+            # quedaban invisibles (nivel debug generico) y un reset rechazado parecia que el
+            # boton "no hacia nada".
+            elif clean_msg.startswith("ERR:"):
+                self.logger.warning(f"Firmware rechazo el comando: {clean_msg}")
+
             # Mensaje no reconocido
             else:
                 self.logger.debug(f"Mensaje no reconocido del STM32: {clean_msg}")
@@ -242,6 +271,17 @@ class RobotController:
             self.logger.critical("Hardware reporto activacion de parada de emergencia.")
             self._force_emergency_stop("Boton fisico de emergencia presionado.")
 
+        elif event_msg == "FAULT":
+            self.logger.critical("Hardware reporto activacion de estado de Falla (FAULT).")
+            self._enter_lockdown_state(
+                SystemState.FAULT,
+                "Falla detectada por firmware (ver EVT:FAULT / logs de FSM).",
+                source="FIRMWARE"
+            )
+
+        elif event_msg.startswith("STATE,"):
+            self._handle_state_event(event_msg[len("STATE,"):])
+
         elif event_msg == "SENSOR":
             self.logger.info("Interrupcion EVT:SENSOR recibida.")
 
@@ -268,6 +308,29 @@ class RobotController:
 
         else:
             self.logger.warning(f"Evento de hardware no reconocido: {event_msg}")
+
+    def _handle_state_event(self, payload: str) -> None:
+        """
+        Procesa EVT:STATE,actual,previo (respuesta a STATUS). Sirve para resincronizar
+        current_state con el estado real reportado por el firmware -- en particular, es el
+        mecanismo de recuperacion tras una perdida de enlace (ver reset_fault/_fault_source),
+        donde el firmware probablemente nunca dejo de operar normalmente.
+
+        Parametros:
+            payload: contenido tras "STATE," (ej. "Manual,Idle")
+        """
+        partes = payload.split(',')
+        if not partes or not partes[0]:
+            self.logger.warning(f"EVT:STATE con payload vacio o mal formado: '{payload}'.")
+            return
+
+        actual_state = _FIRMWARE_STATE_NAMES.get(partes[0])
+        if actual_state is None:
+            self.logger.warning(f"EVT:STATE con estado no reconocido: '{partes[0]}'.")
+            return
+
+        self.logger.info(f"Resincronizando estado con el firmware: {actual_state.value}.")
+        self._change_internal_state(actual_state)
 
     def _handle_state_ack(self, ack_msg: str) -> None:
         """
@@ -310,6 +373,7 @@ class RobotController:
             "ACK_M111": SystemState.MANUAL,          # Fin de grabacion
             "ACK_M112": SystemState.AUTO_RUNNING,    # Inicio de trayectoria
             "ACK_M114": SystemState.AUTO_RUNNING,    # Reanudacion de trayectoria
+            "ACK_M999": SystemState.INIT,            # Reset controlado tras Fault/Emergency
         }
 
         new_state = mapping.get(ack_msg)
@@ -987,13 +1051,31 @@ class RobotController:
 
     def _force_emergency_stop(self, reason: str) -> None:
         """
-        Bloquea el orquestador, purga operaciones y notifica la anomalia
+        Bloquea el orquestador, purga operaciones y notifica la anomalia.
         """
-        self.logger.critical(f"SISTEMA BLOQUEADO. Motivo {reason}")
+        self._enter_lockdown_state(SystemState.EMERGENCY, reason, source="FIRMWARE")
+
+    def _enter_lockdown_state(self, target_state: SystemState, reason: str, source: str) -> None:
+        """
+        Cascada comun de bloqueo de seguridad (FAULT/EMERGENCY): loguea, cambia de estado,
+        aborta cualquier streaming en curso y purga el buffer de grabacion.
+
+        Parametros:
+            target_state: SystemState.FAULT o SystemState.EMERGENCY
+            reason: motivo legible para el log
+            source: "FIRMWARE" si el firmware realmente esta en ese estado (la recuperacion
+                    correcta es M999, ver reset_fault), o "LINK_LOST" si es la PC la que perdio
+                    el enlace y el firmware probablemente sigue operando con normalidad (la
+                    recuperacion correcta es resincronizar via STATUS, no M999).
+        """
+        label = "EMERGENCIA" if target_state == SystemState.EMERGENCY else "FALLA"
+        self.logger.critical(f"SISTEMA BLOQUEADO ({label}). Motivo: {reason}")
+
+        self._fault_source = source
 
         # Bloqueo de maquina de Estados
-        if self.current_state != SystemState.EMERGENCY:
-            self._change_internal_state(SystemState.EMERGENCY)
+        if self.current_state != target_state:
+            self._change_internal_state(target_state)
 
         # Cascada de Abortos: TrajectoryStreamer
         self.logger.warning("Abortando inyeccion asincrona de trayectoria")
@@ -1004,7 +1086,47 @@ class RobotController:
             self.logger.warning("Purgando bufer de grabacion. Datos descartados.")
             self.recording_buffer.clear()
 
-        #! NOTA. Para reanudar, se requiere secuencia estricta de reinicio. (ej M99)
+    def reset_fault(self) -> bool:
+        """
+        Solicita la salida controlada de FAULT/EMERGENCY. El mecanismo depende de como se
+        llego al bloqueo (ver self._fault_source):
+          - "FIRMWARE": el firmware esta realmente en Fault/Emergency -> se envia M999 y se
+            espera ACK_M999 (ver _handle_state_ack) antes de destrabar la UI. Nunca se cambia
+            current_state de forma optimista aca: si el ACK se pierde, la UI debe quedar
+            correctamente trabada en vez de destrabar una falla que puede seguir activa.
+          - "LINK_LOST": la PC perdio el enlace, pero el firmware probablemente nunca dejo de
+            operar con normalidad -> M999 no tiene sentido. Si ya se reconecto, se pide STATUS
+            para resincronizar current_state con lo que el firmware realmente reporta.
+
+        Retorno:
+            bool: True si se despacho algun comando, False si fue denegado por guarda.
+        """
+        if self.current_state not in (SystemState.FAULT, SystemState.EMERGENCY):
+            self.logger.warning("Reset denegado. El sistema no esta en FAULT/EMERGENCY.")
+            return False
+
+        if self._fault_source == "LINK_LOST":
+            if not self.is_connected:
+                self.logger.warning("Reconecte el enlace serial antes de intentar el reset.")
+                return False
+            self.logger.info("Enlace restablecido. Resincronizando estado real con el firmware...")
+            return self._dispatch_command("STATUS", "Resincronizacion tras perdida de enlace")
+
+        self.logger.warning("Solicitando reset de falla/emergencia (M999)...")
+        return self._dispatch_command("M999", "Reset tras Fault/Emergency")
+
+    def _on_unexpected_disconnect(self) -> None:
+        """
+        Invocado (desde el hilo de RX o TX de AsyncUARTCommunicator) cuando el enlace serial se
+        cae de forma NO deliberada. La PC pierde toda visibilidad real del robot -> se bloquea
+        la UI igual que un Fault, pero con origen "LINK_LOST" para que reset_fault() sepa que
+        la recuperacion es resincronizar, no enviar M999.
+        """
+        self._enter_lockdown_state(
+            SystemState.FAULT,
+            "Conexion con el firmware perdida inesperadamente.",
+            source="LINK_LOST"
+        )
 
 
     # ==== METODOS AUXILIARES ====

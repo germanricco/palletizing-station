@@ -590,6 +590,13 @@ class ControlPanel(QWidget):
             self._set_button_enabled(self.btn_simulate, False)
             self._set_button_enabled(self.btn_execute, False)
 
+        # 3b. BLOQUEO TOTAL DE MODOS DURANTE FAULT/EMERGENCY
+        # Sin esto los 3 botones de modo quedaban clickeables (inofensivo, RobotController los
+        # rechaza por guarda de estado antes de tocar el UART, pero engañoso para el operador).
+        is_locked = state_name in ("FAULT", "EMERGENCY")
+        for btn in (self.btn_idle, self.btn_manual, self.btn_auto):
+            self._set_button_enabled(btn, not is_locked)
+
         # 4. LÓGICA DE BLOQUEO DE TELEOPERACIÓN
         # (Movido fuera de la cadena if/elif de arriba: es independiente del ramo de ejecucion/
         # simulacion/palletizado y antes quedaba "colgado" del branch de AUTO_READY, dejando sin
