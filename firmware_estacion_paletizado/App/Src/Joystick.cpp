@@ -14,9 +14,12 @@ Joystick::Joystick(volatile uint32_t* direccion_memoria_x, volatile uint32_t* di
 	  raw_x(0), raw_y(0) {
 }
 
+void Joystick::AcumularMuestra() {
+	_input.AcumularMuestra();
+}
+
 void Joystick::Actualizar() {
-	raw_x = _input.LeerRawX();
-	raw_y = _input.LeerRawY();
+	_input.LeerYReiniciarPromedio(raw_x, raw_y);
 
 	_filtroX.Procesar(raw_x);
 	_filtroY.Procesar(raw_y);

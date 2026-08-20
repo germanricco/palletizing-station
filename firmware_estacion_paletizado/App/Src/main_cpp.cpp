@@ -134,7 +134,15 @@ void Cpp_Main_Init(void) {
 void Cpp_Main_Loop(void) {
     const uint32_t tiempo_actual = HAL_GetTick();
 
-	// Actualizacion de entradas: el joystick se muestrea/filtra a tasa fija para que el filtro EMA interno tenga una frecuencia de corte determinista.
+	// Filtro decimador (integrate-and-dump): acumula una muestra cruda del ADC en CADA vuelta
+	// del loop, sin gate de tasa. Promedia el ruido de banda ancha entre los ~11.9kHz del
+	// ADC/DMA y los 100Hz de muestreo real del joystick, evitando que ese ruido haga aliasing
+	// al decimar (ver nota en JoystickInput.hpp).
+	joystick_izquierdo.AcumularMuestra();
+	joystick_derecho.AcumularMuestra();
+
+	// Muestreo y filtrado del joystick a tasa fija (100Hz): promedia lo acumulado arriba y
+	// alimenta el filtro EMA, que asi tiene una frecuencia de corte determinista.
     static uint32_t tiempoUltimaMuestraJoystick = 0U;
     if ((tiempo_actual - tiempoUltimaMuestraJoystick) >= Config::JOYSTICK_SAMPLE_PERIOD_MS) {
         tiempoUltimaMuestraJoystick += Config::JOYSTICK_SAMPLE_PERIOD_MS;

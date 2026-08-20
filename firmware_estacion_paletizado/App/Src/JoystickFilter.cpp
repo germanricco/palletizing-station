@@ -45,7 +45,11 @@ float JoystickFilter::Procesar(uint32_t valor_adc) {
     }
 
     // 4. Mapeo No Lineal (Interpolar entre respuesta lineal y cubica)
-    if (target != 0.0f) {
+    // Con _curvatura == 0 (config. actual, ver Config::JOYSTICK_CURVATURE) el resultado de este
+    // bloque es siempre target sin cambios -- se evita calcular target^3 (2 multiplicaciones en
+    // software, sin FPU) para nada. El chequeo de _curvatura primero hace cortocircuito en ese
+    // caso sin cambiar el resultado cuando la curvatura si esta activa.
+    if (_curvatura != 0.0f && target != 0.0f) {
         float cubo = target * target * target;
         target = (1.0f - _curvatura) * target + _curvatura * cubo;
     }

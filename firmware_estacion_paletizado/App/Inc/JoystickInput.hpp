@@ -2,6 +2,14 @@
  * @file JoystickInput.hpp
  * @brief Acceso a hardware crudo del joystick: lecturas ADC via DMA y boton fisico con antirrebote.
  * @note Sin logica de calibracion/DSP. Ver JoystickFilter para el procesamiento de senal.
+ * @note Incluye un filtro decimador tipo "integrate-and-dump": el ADC/DMA refresca el buffer
+ * compartido a ~11.9kHz de forma continua, muy por encima de los 100Hz a los que el joystick
+ * se muestrea realmente (ver Config::JOYSTICK_SAMPLE_PERIOD_MS). Sin promediar las muestras
+ * intermedias, tomar una unica lectura instantanea cada 10ms deja pasar sin atenuar cualquier
+ * ruido de banda ancha por encima de 50Hz (Nyquist de esa decimacion) directo al pipeline de
+ * DSP -- el filtro EMA de JoystickFilter, que corre recien despues, no puede deshacer un
+ * aliasing que ya ocurrio en el muestreo. AcumularMuestra() debe llamarse en CADA vuelta del
+ * bucle principal (sin gate de tasa) para que este promediado sea efectivo.
  */
 
 #ifndef JOYSTICK_INPUT_HPP
@@ -25,6 +33,12 @@ private:
 
 	static constexpr uint32_t RETARDO_ANTIRREBOTE_MS = 50;
 
+	// Filtro decimador (integrate-and-dump): acumula crudo cada vuelta del loop, se promedia
+	// y se reinicia una vez por ciclo de muestreo (100Hz). Ver AcumularMuestra().
+	uint32_t _acumuladorX;
+	uint32_t _acumuladorY;
+	uint32_t _muestrasAcumuladas;
+
 public:
 	/**
 	 * @brief Constructor del acceso a hardware del joystick.
@@ -37,14 +51,21 @@ public:
 			GPIO_TypeDef* puerto_sw_asignado, uint16_t pin_sw_asignado);
 
 	/**
-	 * @brief Lectura cruda actual del ADC para el Eje X [0 a 4095].
+	 * @brief Acumula una muestra cruda de ambos ejes (filtro decimador).
+	 * @note Debe llamarse SIN limitar la tasa, en cada vuelta del bucle principal -- es lo que
+	 * promedia el ruido de banda ancha entre los ~11.9kHz del ADC/DMA y los 100Hz de muestreo
+	 * real del joystick, antes de que ese muestreo pueda hacerle aliasing.
 	 */
-	uint32_t LeerRawX() const;
+	void AcumularMuestra();
 
 	/**
-	 * @brief Lectura cruda actual del ADC para el Eje Y [0 a 4095].
+	 * @brief Promedia las muestras acumuladas desde la ultima llamada y reinicia la ventana de
+	 * acumulacion para el proximo ciclo. Debe llamarse una unica vez por ciclo de muestreo
+	 * (100Hz, ver Joystick::Actualizar()).
+	 * @param outX Salida: promedio del eje X [0 a 4095].
+	 * @param outY Salida: promedio del eje Y [0 a 4095].
 	 */
-	uint32_t LeerRawY() const;
+	void LeerYReiniciarPromedio(uint32_t& outX, uint32_t& outY);
 
 	/**
 	 * @brief Inicia el temporizador de la FSM de antirrebote.

@@ -3,7 +3,9 @@
  * @brief Fachada del joystick: compone JoystickInput (hardware) y JoystickFilter (DSP por eje).
  * @note Diseñado para microcontroladores STM32 utilizando DMA y EXTI.
  * @note Actualizar() debe llamarse a tasa fija (ver Config::JOYSTICK_SAMPLE_PERIOD_MS) para que
- * el filtro EMA de cada eje tenga una frecuencia de corte determinista.
+ * el filtro EMA de cada eje tenga una frecuencia de corte determinista. AcumularMuestra(), en
+ * cambio, debe llamarse en CADA vuelta del bucle principal sin gate de tasa -- es el filtro
+ * decimador que promedia el ADC (~11.9kHz) antes de que Actualizar() lo muestree a 100Hz.
  */
 
 #ifndef JOYSTICK_HPP
@@ -41,7 +43,14 @@ public:
 			float umbral_zona_muerta = 0.04f);
 
 	/**
-	 * @brief Lee los datos de la memoria DMA y actualiza los cálculos espaciales.
+	 * @brief Acumula una muestra cruda del ADC para el filtro decimador.
+	 * @note Debe llamarse en CADA vuelta del bucle principal, sin gate de tasa (ver nota de clase).
+	 */
+	void AcumularMuestra();
+
+	/**
+	 * @brief Promedia las muestras acumuladas desde la última llamada y actualiza los cálculos
+	 * espaciales a partir de ese promedio.
 	 * @note Esta función debe ser llamada periódicamente a tasa fija (ver nota de clase),
 	 * no en cada vuelta del bucle principal.
 	 */

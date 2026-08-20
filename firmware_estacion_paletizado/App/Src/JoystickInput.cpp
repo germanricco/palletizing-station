@@ -9,15 +9,35 @@ JoystickInput::JoystickInput(volatile uint32_t* direccion_memoria_x, volatile ui
 		GPIO_TypeDef* puerto_sw_asignado, uint16_t pin_sw_asignado)
     : ptr_raw_x(direccion_memoria_x), ptr_raw_y(direccion_memoria_y),
 	  puerto_sw(puerto_sw_asignado), pin_sw(pin_sw_asignado),
-	  tiempo_inicio_debounce(0), en_proceso_debounce(false) {
+	  tiempo_inicio_debounce(0), en_proceso_debounce(false),
+	  _acumuladorX(0U), _acumuladorY(0U), _muestrasAcumuladas(0U) {
 }
 
-uint32_t JoystickInput::LeerRawX() const {
-	return (ptr_raw_x != nullptr) ? *ptr_raw_x : 0U;
+void JoystickInput::AcumularMuestra() {
+	if (ptr_raw_x != nullptr) {
+		_acumuladorX += *ptr_raw_x;
+	}
+	if (ptr_raw_y != nullptr) {
+		_acumuladorY += *ptr_raw_y;
+	}
+	_muestrasAcumuladas++;
 }
 
-uint32_t JoystickInput::LeerRawY() const {
-	return (ptr_raw_y != nullptr) ? *ptr_raw_y : 0U;
+void JoystickInput::LeerYReiniciarPromedio(uint32_t& outX, uint32_t& outY) {
+	if (_muestrasAcumuladas > 0U) {
+		outX = _acumuladorX / _muestrasAcumuladas;
+		outY = _acumuladorY / _muestrasAcumuladas;
+	} else {
+		// No deberia ocurrir: AcumularMuestra() se llama sin gate en la misma vuelta de loop
+		// que puede disparar este promediado, asi que siempre hay al menos 1 muestra. Se deja
+		// como red de seguridad barata ante un futuro cambio de orden de llamadas.
+		outX = 0U;
+		outY = 0U;
+	}
+
+	_acumuladorX = 0U;
+	_acumuladorY = 0U;
+	_muestrasAcumuladas = 0U;
 }
 
 void JoystickInput::NotificarInterrupcion(uint16_t pin_disparado) {
