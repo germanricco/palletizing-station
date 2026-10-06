@@ -31,4 +31,5 @@ logs/
 trajectories/
 
 # Archivos de documentacion
-documents/
+documents/venv/
+venv/
