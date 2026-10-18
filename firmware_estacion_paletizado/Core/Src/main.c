@@ -479,7 +479,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pins : A1P_Pin A2P_Pin */
   GPIO_InitStruct.Pin = A1P_Pin|A2P_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
