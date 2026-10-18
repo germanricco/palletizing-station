@@ -48,6 +48,28 @@ namespace Config {
 	// Actuador
 
 	/**
+	 * ======== CINTA TRANSPORTADORA ========
+	 */
+	// Velocidad nominal normalizada [0.0 a 1.0]. Con TIM2 ARR=49 (PWM 20kHz, 50 pasos) y
+	// CINTA_MIN_CCR=0, MotorDC trunca v*49: 0.25 -> CCR=12 (24%), 0.27 -> CCR=13 (26%).
+	// El 25% exacto no es representable (seria CCR=12.5).
+	constexpr float CINTA_VELOCIDAD_NOMINAL = 0.27f;
+
+	// Duracion de la rampa lineal de arranque. Evita que la caja patine y limita el pico de
+	// corriente de arranque del motor. El frenado es siempre inmediato (precision de parada).
+	constexpr uint32_t CINTA_RAMPA_ARRANQUE_MS = 300U;
+
+	// Umbral minimo de CCR para vencer la friccion estatica (ver MotorDC). Ojo: modificarlo
+	// cambia el duty efectivo de CINTA_VELOCIDAD_NOMINAL.
+	constexpr uint32_t CINTA_MIN_CCR = 0U;
+
+	// Antirrebote del sensor IR de fin de cinta (FC-51, activo en bajo, PB12).
+	constexpr uint32_t SENSOR_IR_DEBOUNCE_MS = 30U;
+
+	// Modo de prueba aislada de la clase Cinta (sin StationController). Solo para bring-up.
+	constexpr bool CINTA_BRINGUP = true;
+
+	/**
 	 * ======== CALIBRACION DE ENTRADAS ANALOGICAS (JOYSTICKS) ========
 	 */
 	constexpr float ADC_MAX_RESOLUTION = 4095.0f;

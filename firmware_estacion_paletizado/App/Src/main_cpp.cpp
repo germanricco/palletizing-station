@@ -8,6 +8,7 @@
 #include "Logger.hpp"
 #include "StationController.hpp"
 #include "SensorIR.hpp"
+#include "Cinta.hpp"
 
 #include "stm32f1xx_hal.h"
 #include <cstdio>
@@ -68,10 +69,15 @@ Servo servo_codo(&TIM3->CCR3,
 
 
 // MotorDC
-MotorDC motor_cinta(&TIM2->CCR3, 49, 0);
+MotorDC motor_cinta(&TIM2->CCR3, 49, Config::CINTA_MIN_CCR);
 
 //SensorIR//IMPORTANTE: suponemos que el IR da un nivel LOW cuando detecta por eso RESET
-SensorIR sensor_fin_cinta(GPIOB,GPIO_PIN_12,GPIO_PIN_RESET,30);
+SensorIR sensor_fin_cinta(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET, Config::SENSOR_IR_DEBOUNCE_MS);
+
+// Cinta transportadora (sub-maquina: motor + sensor de fin de cinta)
+Cinta cinta_transportadora(motor_cinta, sensor_fin_cinta,
+                           Config::CINTA_VELOCIDAD_NOMINAL,
+                           Config::CINTA_RAMPA_ARRANQUE_MS);
 
 // Actuador
 Actuador efector_final(&TIM2->CCR1, &TIM2->CCR2, 49, 800);
@@ -121,6 +127,13 @@ void Cpp_Main_Init(void) {
     // Sensor IR de fin de cinta
     sensor_fin_cinta.init(HAL_GetTick());
 
+    // Cinta transportadora (arranca deshabilitada)
+    cinta_transportadora.init(HAL_GetTick());
+    if (Config::CINTA_BRINGUP) {
+        Logger::logINFO("BRINGUP CINTA: modo de prueba aislada activo. Armando cinta.");
+        cinta_transportadora.armar(HAL_GetTick());
+    }
+
     // Controlador
     stationController.init();
 
@@ -153,13 +166,43 @@ void Cpp_Main_Loop(void) {
 
     terminal.update();
 
-    bool cambio_sensor_fin_cinta = sensor_fin_cinta.update(tiempo_actual);
+    if (Config::CINTA_BRINGUP) {
+        // ===============================================================================
+        // BRING-UP DE LA CINTA (temporal, ver docs/cinta_transportadora.md - Fase 3)
+        // La clase Cinta se ejercita sola. El robot se simula liberando el pick 3 s despues
+        // de la deteccion. Cinta::update es el unico consumidor de SensorIR::update.
+        // ===============================================================================
+        static EstadoCinta estadoCintaPrevio = EstadoCinta::Deshabilitada;
+        static uint32_t tiempoInicioEsperaPick = 0U;
 
-    // Flanco de deteccion: notificamos al orquestador de la PC via protocolo estructurado
-    // (antes solo se logueaba localmente, invisible para la maquina de estados de la PC).
-    if (cambio_sensor_fin_cinta && sensor_fin_cinta.objetoDetectado())
-    {
-        terminal.enviarNormal("EVT:SENSOR\r\n");
+        if (cinta_transportadora.update(tiempo_actual) == EventoCinta::ObjetoDetectado) {
+            terminal.enviarNormal("EVT:SENSOR\r\n");
+        }
+
+        const EstadoCinta estadoCinta = cinta_transportadora.getEstado();
+        if (estadoCinta != estadoCintaPrevio) {
+            Logger::logINFO("BRINGUP CINTA: %s -> %s",
+                            Cinta::toString(estadoCintaPrevio), Cinta::toString(estadoCinta));
+            if (estadoCinta == EstadoCinta::EsperandoPick) {
+                tiempoInicioEsperaPick = tiempo_actual;
+            }
+            estadoCintaPrevio = estadoCinta;
+        }
+
+        // Pick simulado: liberacion 3 s despues de detenerse
+        if ((estadoCinta == EstadoCinta::EsperandoPick) &&
+            ((tiempo_actual - tiempoInicioEsperaPick) >= 3000U)) {
+            cinta_transportadora.liberarPick();
+        }
+    } else {
+        bool cambio_sensor_fin_cinta = sensor_fin_cinta.update(tiempo_actual);
+
+        // Flanco de deteccion: notificamos al orquestador de la PC via protocolo estructurado
+        // (antes solo se logueaba localmente, invisible para la maquina de estados de la PC).
+        if (cambio_sensor_fin_cinta && sensor_fin_cinta.objetoDetectado())
+        {
+            terminal.enviarNormal("EVT:SENSOR\r\n");
+        }
     }
 
     // ===================================================================================
