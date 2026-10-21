@@ -79,11 +79,23 @@ class WireframeCanvas(FigureCanvasQTAgg):
         # Ajuste de márgenes internos para maximizar área de dibujo
         self.fig.tight_layout()
 
-        # El redibujado 3D (draw_idle) es, por lejos, la operacion mas cara de todo el
-        # dashboard (Axes3D no soporta blitting como el 2D). Se throttlea de forma independiente
-        # a la tasa de telemetria/UI (20Hz) para no cargar el hilo de la GUI innecesariamente.
+        # Renderizado por blitting. Un redibujado completo de Axes3D (ejes, grilla, ticks) cuesta
+        # ~130 ms a 1440x750 y saturaba el hilo de la GUI (y con el, el GIL que comparte el hilo
+        # RX). Como la camara solo cambia al redimensionar o rotar con el mouse, el fondo se
+        # cachea en cada dibujado completo (draw_event) y por frame solo se repintan los 3
+        # artistas del brazo sobre esa copia (~12 ms).
+        for artist in self._arm_artists():
+            artist.set_animated(True)
+        self._background = None
+        self.mpl_connect('draw_event', self._on_draw_event)
+
+        # Ultimo frame efectivamente dibujado: si la telemetria repite la pose (robot quieto),
+        # no se repinta nada.
+        self._last_drawn_state = None
         self._last_draw_time = 0.0
-        self._min_draw_interval = 1.0 / 15.0  # cap a ~15Hz
+        # Tope propio por encima de los 20 FPS de la UI (RobotGUIApp ya limita la tasa): con el
+        # mismo valor, dos frames de UI que llegan algo juntos hacian descartar uno (~10 Hz).
+        self._min_draw_interval = 1.0 / 30.0
 
         # Inyectar Posición "Home" por defecto para que se vea el brazo
         # al arrancar la UI (Matriz de 6 eslabones x 3 coordenadas X, Y, Z)
@@ -98,6 +110,23 @@ class WireframeCanvas(FigureCanvasQTAgg):
         ], dtype=np.float32)
 
         self.draw_robot(default_home_state)
+
+    def _arm_artists(self) -> tuple:
+        """Artistas dinamicos del brazo (se repintan por blitting)."""
+        return (self.line_wireframe, self.scatter_joints, self.scatter_tcp)
+
+    def _draw_arm(self) -> None:
+        """Dibuja los artistas del brazo sobre el renderer actual."""
+        for artist in self._arm_artists():
+            self.ax.draw_artist(artist)
+
+    def _on_draw_event(self, event) -> None:
+        """
+        Tras cada dibujado completo (inicio, resize, rotacion con el mouse) se cachea el fondo
+        estatico y se agrega el brazo, que por ser 'animated' no lo incluye el draw normal.
+        """
+        self._background = self.copy_from_bbox(self.fig.bbox)
+        self._draw_arm()
 
     def _update_joints(self, frame_state: np.ndarray) -> None:
         """Actualiza memoria gráfica de nodos y TCP."""
@@ -117,11 +146,6 @@ class WireframeCanvas(FigureCanvasQTAgg):
         Y_tcp = frame_state[-1:, 1]
         Z_tcp = frame_state[-1:, 2]
         
-        self.scatter_tcp.set_data(X_tcp, Y_tcp)
-        self.scatter_tcp.set_3d_properties(Z_tcp)
-
-        # TCP (Índice 5)
-        X_tcp, Y_tcp, Z_tcp = frame_state[5:6, 0], frame_state[5:6, 1], frame_state[5:6, 2]
         self.scatter_tcp.set_data(X_tcp, Y_tcp)
         self.scatter_tcp.set_3d_properties(Z_tcp)
 
@@ -148,17 +172,30 @@ class WireframeCanvas(FigureCanvasQTAgg):
             frame_state = cartesian_state
 
         if frame_state.shape != (7, 3):
-            raise ValueError(f"Dimensión incorrecta. Se requiere (6, 3), recibido: {frame_state.shape}")
+            raise ValueError(f"Dimensión incorrecta. Se requiere (7, 3), recibido: {frame_state.shape}")
+
+        # Pose identica a la ultima dibujada (robot quieto): nada que repintar
+        if self._last_drawn_state is not None and np.array_equal(frame_state, self._last_drawn_state):
+            return
 
         self._update_wireframe(frame_state)
         self._update_joints(frame_state)
 
-        # Throttle del repintado real: los datos de arriba ya quedaron actualizados (son baratos,
-        # solo reemplazan arrays chicos), pero el redibujado en si (draw_idle) se limita aparte.
+        # Throttle del repintado: si se saltea este frame no se registra como dibujado, asi el
+        # proximo (aunque repita la pose) lo termina de mostrar.
         now = time.monotonic()
         if (now - self._last_draw_time) < self._min_draw_interval:
             return
         self._last_draw_time = now
+        self._last_drawn_state = np.array(frame_state, copy=True)
 
-        # Refresco asíncrono optimizado para integración en Event Loop de Qt
-        self.draw_idle()
+        if self._background is None:
+            # Todavia no hubo un dibujado completo (ventana sin mostrar): se pide uno, y su
+            # draw_event cachea el fondo para los frames siguientes.
+            self.draw_idle()
+            return
+
+        # Blitting: fondo cacheado + brazo, repintando solo la region de la figura
+        self.restore_region(self._background)
+        self._draw_arm()
+        self.blit(self.fig.bbox)

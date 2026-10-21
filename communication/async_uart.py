@@ -1,4 +1,5 @@
 import serial
+import logging
 import threading
 import queue
 import time
@@ -44,6 +45,10 @@ class AsyncUARTCommunicator(ICommunication):
     Actúa como un conducto (pipe). solo junta y transfiere strings sin bloquear el hilo principal.
     """
 
+    # Tope del buffer de linea en RX: si se acumulan mas bytes sin un '\n' es basura (ruido,
+    # baudrate incorrecto) y se descarta para no crecer sin limite.
+    _RX_MAX_LINE_BYTES = 4096
+
     def __init__(self, port: str, baudrate: int = 115200):
         self.port = port
         self.baudrate = baudrate
@@ -65,10 +70,12 @@ class AsyncUARTCommunicator(ICommunication):
         # de disconnect() que es una desconexion pedida explicitamente por el usuario.
         self._disconnect_callback: Optional[Callable[[], None]] = None
 
+        self.logger = logging.getLogger("STM32_Controller.UART")
+
     def connect(self) -> bool:
         """Abre el puerto serie y levanta los hilos daemon de trabajo."""
         try:
-            # timeout=0.1 es para que serial.readline() no se bloquee infinitamente
+            # timeout=0.1: la lectura de _rx_loop no se bloquea indefinidamente sin datos
             self.serial_conn = serial.Serial(self.port, self.baudrate, timeout=0.1)
             
             self._running = True
@@ -79,11 +86,11 @@ class AsyncUARTCommunicator(ICommunication):
             # Iniciar los hilos de trabajo en paralelo
             self._rx_thread.start()
             self._tx_thread.start()
-            print(f"[UART] Conexión establecida en {self.port} a {self.baudrate} bps.")
+            self.logger.info(f"Conexión establecida en {self.port} a {self.baudrate} bps.")
             return True
         
         except serial.SerialException as e:
-            print(f"[UART Error] Fallo al abrir el puerto {self.port}: {e}")
+            self.logger.error(f"Fallo al abrir el puerto {self.port}: {e}")
             return False
 
     def disconnect(self) -> None:
@@ -98,7 +105,7 @@ class AsyncUARTCommunicator(ICommunication):
             
         if self.serial_conn and self.serial_conn.is_open:
             self.serial_conn.close()
-            print(f"[UART] Puerto {self.port} cerrado correctamente.")
+            self.logger.info(f"Puerto {self.port} cerrado correctamente.")
 
     def send_message(self, message: str) -> bool:
         """
@@ -109,7 +116,7 @@ class AsyncUARTCommunicator(ICommunication):
             self.tx_queue.put_nowait(message)
             return True
         except queue.Full:
-            print("[UART Error] Buffer TX de la PC lleno. Mensaje descartado.")
+            self.logger.error("Buffer TX de la PC lleno. Mensaje descartado.")
             return False
 
     def set_rx_callback(self, callback: Callable[[str], None]) -> None:
@@ -153,31 +160,52 @@ class AsyncUARTCommunicator(ICommunication):
             except queue.Empty:
                 pass
             except serial.SerialException as e:
-                print(f"[UART Error] Excepción en escritura TX: {e}")
+                self.logger.error(f"Excepción en escritura TX: {e}")
                 self._notify_unexpected_disconnect()
 
     def _rx_loop(self) -> None:
-        """Escucha constantemente el puerto y dispara el callback al recibir datos."""
+        """
+        Escucha constantemente el puerto y dispara el callback por cada linea recibida.
+
+        Lee por bloques (todo lo disponible) en vez de usar serial.readline(): en pyserial,
+        readline() lee de a UN byte (un select + un read por caracter), y en cada uno suelta y
+        vuelve a pedir el GIL. Con el hilo de la GUI ocupado, cada re-adquisicion puede esperar
+        varios ms y la lectura queda por debajo de la tasa de telemetria (50 Hz): el atraso
+        crece sin limite y los REQ_CHUNK se atienden tarde.
+        """
+        buffer = bytearray()
+
         while self._running:
             if self.serial_conn and self.serial_conn.is_open:
                 try:
-                    # El hilo RX se bloquea aca hasta que encuentre \r\n o timeout ocurra.
-                    line_bytes = self.serial_conn.readline()
-                    if not line_bytes:
+                    # Bloquea hasta timeout (0.1 s) si no hay datos; si los hay, trae todos.
+                    data = self.serial_conn.read(self.serial_conn.in_waiting or 1)
+                    if not data:
                         continue
-                        
-                    # Decodificar y limpiar el mensaje crudo.
-                    # Usamos 'ascii' con 'ignore' para evitar errores de decodificación por caracteres corruptos.
-                    line = line_bytes.decode('ascii', errors='ignore').strip()
-                    if not line:
-                        continue
-                        
-                    # Propagar la información inmediatamente a la capa que esté escuchando
-                    if self._rx_callback:
-                        self._rx_callback(line)
-                        
-                except serial.SerialException as e:
-                    print(f"[UART Error] Excepción en lectura RX: {e}")
+                    buffer.extend(data)
+
+                    # Despachar cada linea completa (el firmware termina con \r\n)
+                    while True:
+                        idx = buffer.find(b"\n")
+                        if idx < 0:
+                            break
+                        line_bytes = bytes(buffer[:idx])
+                        del buffer[:idx + 1]
+
+                        # 'ascii' con 'ignore' evita errores por caracteres corruptos.
+                        line = line_bytes.decode('ascii', errors='ignore').strip()
+                        if line and self._rx_callback:
+                            self._rx_callback(line)
+
+                    if len(buffer) > self._RX_MAX_LINE_BYTES:
+                        self.logger.warning("Linea RX demasiado larga sin terminador. Descartada.")
+                        buffer.clear()
+
+                except (serial.SerialException, OSError) as e:
+                    # in_waiting es un ioctl directo: ante un desenchufe del USB lanza OSError
+                    # (EIO) sin envolver en SerialException. Sin capturarlo, el hilo RX moriria
+                    # en silencio y no se dispararia el bloqueo por perdida de enlace.
+                    self.logger.error(f"Excepción en lectura RX: {e}")
                     self._notify_unexpected_disconnect()
             else:
                 # Prevenir saturación de CPU si el puerto se cierra inesperadamente

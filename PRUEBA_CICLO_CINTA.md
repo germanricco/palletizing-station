@@ -33,6 +33,7 @@ Marcar cada paso. Si uno falla, anotar el número y copiar el panel de logs de l
 | # | Acción | Resultado esperado |
 |---|---|---|
 | 1 | **CONECTAR STM32** | La tarjeta CINTA pasa de `DESCONOCIDO` a `DETENIDA`. La cinta está quieta. |
+| 1b | Pasar a MANUAL y mover el robot con el joystick | El gemelo digital y los valores de las articulaciones siguen al robot sin atraso, y los botones responden al instante. *(Antes la app se trababa: se optimizaron la lectura serie y el dibujo 3D.)* |
 | 2 | Modo **IDLE**, botón **MARCHA** | La cinta arranca suave (~0,3 s). La tarjeta muestra `MARCHA MANUAL` en cian y el botón cambia a PARADA. |
 | 3 | Con la cinta en marcha, poner una caja que llegue al sensor | La cinta frena sola y la tarjeta vuelve a `DETENIDA`. |
 | 4 | Con la caja frente al sensor, tocar **MARCHA** | No arranca (protección: no tira la caja). El log muestra `ERR:SENSOR_ACTIVO`. |

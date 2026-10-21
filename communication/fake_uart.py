@@ -2,7 +2,7 @@ import threading
 import queue
 import time
 from typing import Callable, Optional
-from interfaces.communication import ICommunication
+from communication.async_uart import ICommunication
 
 class FakeUARTCommunicator(ICommunication):
     """

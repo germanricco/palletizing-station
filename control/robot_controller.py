@@ -72,6 +72,11 @@ class RobotController:
         # telemetria pura (ver _handle_telemetry) para no pisarlo con 0 en cada uno de ellos.
         self._current_progress: int = 0
 
+        # Ultimos angulos de telemetria procesados por la cinematica. Con el robot quieto la
+        # telemetria repite los mismos valores a 50 Hz: no hace falta recalcular la cinematica
+        # directa (~0.7 ms con el GIL tomado) en cada trama.
+        self._last_telemetry_joints: Optional[tuple] = None
+
         # Gestor de Recetas (Palletizado)
         self.active_recipe: List[str] = []      # Lista de archivos de trayectorias en orden
         self.current_recipe_step: int = 0       # Indice de la caja actual (0 = Caja A)
@@ -259,9 +264,12 @@ class RobotController:
             # Si estamos simulando salimos sin procesar la telemetria real
             if self._is_simulating: return
 
-            # Entregar datos al modelo cinematico y actualizar estado
-            s1_rad, s2_rad, s3_rad = np.deg2rad(s1_deg), np.deg2rad(s2_deg), np.deg2rad(s3_deg)
-            self.robot.update_state(s1_rad, s2_rad, s3_rad)
+            # Entregar datos al modelo cinematico y actualizar estado (solo si cambiaron)
+            joints_deg = (s1_deg, s2_deg, s3_deg)
+            if joints_deg != self._last_telemetry_joints:
+                s1_rad, s2_rad, s3_rad = np.deg2rad(s1_deg), np.deg2rad(s2_deg), np.deg2rad(s3_deg)
+                self.robot.update_state(s1_rad, s2_rad, s3_rad)
+                self._last_telemetry_joints = joints_deg
             self.actuator_active = is_actuator_on
             kin_array = self.robot.get_angular_state()
 
@@ -1255,12 +1263,17 @@ class RobotController:
             # Apagamos el flag. En los próximos 20 milisegundos, la telemetría viva del 
             # hardware volverá a entrar, el brazo "saltará" a la realidad, indicando 
             # visualmente que la simulación terminó.
+            # El modelo cinematico quedo con la pose simulada: forzar que la proxima trama real
+            # recalcule aunque traiga los mismos angulos que antes de simular. Se invalida ANTES
+            # de bajar la bandera, para que ninguna trama intermedia reuse la pose simulada.
+            self._last_telemetry_joints = None
             self._is_simulating = False
 
     def stop_simulation(self):
         """
         Detiene el hilo de simulación y limpia la UI.
         """
+        self._last_telemetry_joints = None   # ver _simulation_worker (pose simulada en el modelo)
         self._is_simulating = False
         self.logger.info("Simulación detenida por el usuario.")
         # Enviamos un último callback con progreso 0 para limpiar la barra en la UI

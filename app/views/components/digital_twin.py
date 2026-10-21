@@ -54,6 +54,10 @@ class DigitalTwin(QWidget):
         # frame de telemetria si (state_name, actuator_active) no cambiaron (ver _update_hud_status).
         self._last_hud_signature = None
 
+        # Ultimo error de render reportado: se loguea una sola vez por tipo, no en cada frame
+        # de telemetria (20/s hacia el visor de logs de la GUI).
+        self._last_render_error = None
+
         # Capa 0: Layout de fondo exclusivo
         self.bg_layout = QVBoxLayout(self)
         self.bg_layout.setContentsMargins(0, 0, 0, 0)
@@ -214,9 +218,13 @@ class DigitalTwin(QWidget):
             # 3. Actualizar HUD Izquierdo (Estados y Actuadores)
             # Pasamos el booleano directamente
             self._update_hud_status(state_name, actuator_active)
+            self._last_render_error = None
 
         except Exception as e:
-            logging.error(f"Error procesando telemetría en DigitalTwin: {e}")
+            error_text = f"{type(e).__name__}: {e}"
+            if error_text != self._last_render_error:
+                self._last_render_error = error_text
+                logging.error(f"Error procesando telemetría en DigitalTwin: {error_text}")
 
     def set_timeline_state(self, is_active: bool, progress: int = 0, text: str = "TRAYECTORIA ACTIVA") -> None:
         """
