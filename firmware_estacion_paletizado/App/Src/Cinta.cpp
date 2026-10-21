@@ -143,6 +143,10 @@ void Cinta::liberarPick() {
     }
 }
 
+void Cinta::cancelarLiberacion() {
+    _pickLiberado = false;
+}
+
 bool Cinta::setVelocidadManual(float velocidad, uint32_t nowMs) {
     // Saturacion
     if (velocidad > 1.0f) velocidad = 1.0f;

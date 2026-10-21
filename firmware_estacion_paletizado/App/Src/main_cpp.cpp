@@ -89,7 +89,7 @@ TerminalSerial terminal(&huart1);
 Station::Controller stationController(terminal,
 									joystick_izquierdo, joystick_derecho,
 									servo_base, servo_hombro, servo_codo,
-									efector_final);
+									efector_final, cinta_transportadora);
 
 
 // ==== INICIALIZACION DEL SISTEMA ====
@@ -127,19 +127,15 @@ void Cpp_Main_Init(void) {
     // Sensor IR de fin de cinta
     sensor_fin_cinta.init(HAL_GetTick());
 
-    // Cinta transportadora (arranca deshabilitada)
+    // Cinta transportadora (arranca deshabilitada; la arma la FSM con M120)
     cinta_transportadora.init(HAL_GetTick());
-    if (Config::CINTA_BRINGUP) {
-        Logger::logINFO("BRINGUP CINTA: modo de prueba aislada activo. Armando cinta.");
-        cinta_transportadora.armar(HAL_GetTick());
-    }
 
     // Controlador
     stationController.init();
 
     // Mensaje Inicial
     terminal.enviarNormal(
-        "PROTO: M98 M99 M100 M101 M110 M111 M112 M113 M114 M116 M999 M00 STATUS\r\n");
+        "PROTO: M98 M99 M100 M101 M110 M111 M112 M113 M114 M116 M120 M121 M122 M999 M00 STATUS\r\n");
 }
 
 
@@ -166,81 +162,8 @@ void Cpp_Main_Loop(void) {
 
     terminal.update();
 
-    if (Config::CINTA_BRINGUP) {
-        // ===============================================================================
-        // BRING-UP DE LA CINTA (temporal, ver docs/cinta_transportadora.md - Fase 3)
-        // La clase Cinta se ejercita sola. El robot se simula liberando el pick 3 s despues
-        // de la deteccion. Cinta::update es el unico consumidor de SensorIR::update.
-        // ===============================================================================
-        static EstadoCinta estadoCintaPrevio = EstadoCinta::Deshabilitada;
-        static uint32_t tiempoInicioEsperaPick = 0U;
-
-        if (cinta_transportadora.update(tiempo_actual) == EventoCinta::ObjetoDetectado) {
-            terminal.enviarNormal("EVT:SENSOR\r\n");
-        }
-
-        const EstadoCinta estadoCinta = cinta_transportadora.getEstado();
-        if (estadoCinta != estadoCintaPrevio) {
-            Logger::logINFO("BRINGUP CINTA: %s -> %s",
-                            Cinta::toString(estadoCintaPrevio), Cinta::toString(estadoCinta));
-            if (estadoCinta == EstadoCinta::EsperandoPick) {
-                tiempoInicioEsperaPick = tiempo_actual;
-            }
-            estadoCintaPrevio = estadoCinta;
-        }
-
-        // Pick simulado: liberacion 3 s despues de detenerse
-        if ((estadoCinta == EstadoCinta::EsperandoPick) &&
-            ((tiempo_actual - tiempoInicioEsperaPick) >= 3000U)) {
-            cinta_transportadora.liberarPick();
-        }
-    } else {
-        bool cambio_sensor_fin_cinta = sensor_fin_cinta.update(tiempo_actual);
-
-        // Flanco de deteccion: notificamos al orquestador de la PC via protocolo estructurado
-        // (antes solo se logueaba localmente, invisible para la maquina de estados de la PC).
-        if (cambio_sensor_fin_cinta && sensor_fin_cinta.objetoDetectado())
-        {
-            terminal.enviarNormal("EVT:SENSOR\r\n");
-        }
-    }
-
-    // ===================================================================================
-    /**
-     * RUTINA DE PRUEBA: PERFIL DE VELOCIDAD MOTOR CINTA
-     */
-    // Ciclo de prueba de 12000 ms (12 segundos)
-    /*uint32_t tiempo_ciclo = tiempo_actual % 12000;
-    float velocidad_prueba = 0.0f;
-
-    if (tiempo_ciclo < 1000) {
-    	// Fase 1: Aceleración Lineal (0 a 1 seg)
-        // Mapea el tiempo de (0 a 1000 ms) al rango de velocidad (0.0f a 0.5f)
-        velocidad_prueba = (static_cast<float>(tiempo_ciclo) / 1000.0f) * 0.25f;
-    }
-    else if (tiempo_ciclo < 11000) {
-        // Fase 2: Mantenimiento de Velocidad (1 a 11 seg)
-        // Mantiene la velocidad constante durante 10 segundos
-        velocidad_prueba = 0.25f;
-    }
-    else {
-        // Fase 3: Desaceleración Lineal (11 a 12 seg)
-        // Mapea el tiempo de (11000 a 12000 ms) para reducir la velocidad de 0.5f a 0.0f
-        velocidad_prueba = 0.25f - ((static_cast<float>(tiempo_ciclo - 11000) / 1000.0f) * 0.25f);
-    }
-
-    // Inyección de la velocidad calculada al motor
-    //motor_cinta.setSpeed(velocidad_prueba);
-    float velocidad_motor_cinta = velocidad_prueba;
-
-    if (sensor_fin_cinta.objetoDetectado())
-    {
-        velocidad_motor_cinta = 0.0f;
-    }
-
-    motor_cinta.setSpeed(velocidad_motor_cinta);*/
-    // ===================================================================================
-
+    // La cinta (sensor de fin de cinta incluido) se actualiza dentro del controlador:
+    // Cinta::update es el unico consumidor de SensorIR::update y emite EVT:SENSOR/EVT:CINTA.
     stationController.update(tiempo_actual);
 
     // Log para detectar cambios de estado (opcional)

@@ -183,12 +183,8 @@ class MainWindow(QMainWindow):
 
         # 4. ENRUTAMIENTO AL PANEL DE CONTROL
         if hasattr(self, 'control_panel_widget'):
-            # Detectar si estamos en modo receta basado en la UI
-            current_label_text = self.control_panel_widget.lbl_loaded_file.text()
-            is_recipe = current_label_text.startswith("RECETA")
-            
             # Delegamos la lógica de botones
-            self.control_panel_widget.update_machine_state(current_state, progress, is_recipe_mode=is_recipe)
+            self.control_panel_widget.update_machine_state(current_state, progress)
             self.control_panel_widget.update_actuator_state(actuator_active)
 
             # Actualizamos los visores de teleoperación

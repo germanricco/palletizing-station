@@ -110,6 +110,12 @@ public:
     void liberarPick();
 
     /**
+     * @brief Descarta una liberacion pendiente (el robot inicia una nueva trayectoria de pick).
+     * @note Evita que un pick reintentado arranque la cinta apenas el brazo levanta la caja.
+     */
+    void cancelarLiberacion();
+
+    /**
      * @brief Marcha manual de prueba/calibracion.
      * @param velocidad Consigna normalizada [0.0 a 1.0]. 0 detiene y deshabilita.
      * @return false si se pidio marcha con una caja frente al sensor (no se mueve).

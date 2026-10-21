@@ -1,5 +1,6 @@
 #include "StationController.hpp"
 #include "Logger.hpp"
+#include "Config.hpp"
 #include "stm32f1xx_hal.h"
 
 #include <cstdio>
@@ -75,6 +76,24 @@ namespace Station {
  *   telemetria (T:J1,J2,J3,A1) sigue enviandose sin ningun cambio de formato durante el regreso
  *   a Home, y RECORDING sigue capturandola sin interrupcion -- es literalmente el punto de la
  *   funcionalidad (cerrar la trayectoria grabada en el mismo punto en que arranco).
+ *
+ * CINTA TRANSPORTADORA (sub-maquina ortogonal, ver Cinta.hpp):
+ *   No agrega GlobalStates. La FSM global solo la arma, la desarma y libera el pick:
+ *
+ *   AutoReady --M120--> cinta armada (Avanzando, o EsperandoPick + EVT:SENSOR si ya hay caja)
+ *   Cualquier estado --M121--> cinta deshabilitada (se acepta incluso en Fault/Emergency)
+ *   Idle/Manual --M122 [S<v>]--> marcha manual de prueba (S0 detiene)
+ *
+ *   El frenado ante la deteccion lo decide el firmware (Cinta::update), sin ida y vuelta por
+ *   UART. La PC recibe EVT:SENSOR y lanza la trayectoria. Al terminarla (EOF) se marca
+ *   _pickCompletado, y la cinta se libera CINTA_RETARDO_LIBERACION_MS despues, ya en AutoReady
+ *   (el brazo esta volviendo a Home por el requisito RTH de la PC; en DirectPosition no hay
+ *   realimentacion de llegada, por eso el retardo es por tiempo). El rearranque efectivo espera
+ *   ademas a que el sensor quede libre (pick fallido => no arranca hasta retirar la caja).
+ *
+ *   Desarme automatico al entrar a Init, Idle, Manual, Recording, Fault y Emergency, y a
+ *   AutoReady salvo que se venga de AutoRunning (fin normal de trayectoria: queda armada
+ *   entre cajas). Cada cambio de estado de la cinta se informa con EVT:CINTA,<ESTADO>.
  * ================================================================
  */
 
@@ -83,7 +102,7 @@ namespace Station {
 Controller::Controller(TerminalSerial& terminal,
                        Joystick& joystickIzquierdo,	Joystick& joystickDerecho,
                        Servo& servoBase, Servo& servoHombro, Servo& servoCodo,
-					   Actuador& efectorFinal)
+					   Actuador& efectorFinal, Cinta& cinta)
     : _terminal(terminal),
       _joystickIzquierdo(joystickIzquierdo),
 	  _joystickDerecho(joystickDerecho),
@@ -91,6 +110,7 @@ Controller::Controller(TerminalSerial& terminal,
 	  _servoHombro(servoHombro),
 	  _servoCodo(servoCodo),
 	  _efectorFinal(efectorFinal),
+	  _cinta(cinta),
       _state(GlobalState::Boot),
       _previousState(GlobalState::Boot),
       _stateChanged(false),
@@ -107,6 +127,10 @@ Controller::Controller(TerminalSerial& terminal,
       _chunkRequestTick(0U),
       _endOfTrajectoryPending(false),
       _homingActive(false),
+      _pickCompletado(false),
+      _tiempoFinTrayectoria(0U),
+      _eventoSensorPendiente(false),
+      _ultimoEstadoCintaReportado(EstadoCinta::Deshabilitada),
 	  _lastTrajectoryTick(0U),
 	  _lastFifoDataTick(0U) {
 }
@@ -123,12 +147,22 @@ void Controller::init(void) {
     _tiempoUltimoEnvioTelemetria = 0U;
     clearAutoRuntimeState();
 
+    _pickCompletado = false;
+    _eventoSensorPendiente = false;
+    _ultimoEstadoCintaReportado = _cinta.getEstado();
+
     onEnterState(_state);
 }
 
 // UPDATE PRINCIPAL DEL CONTROLADOR
 void Controller::update(uint32_t nowMs) {
     if (!_initialized) init();
+
+    // Cinta transportadora: primero, para que el frenado ante la deteccion no espere al
+    // parseo de UART. El EVT:SENSOR se difiere hasta despues del ACK del comando en curso.
+    if (_cinta.update(nowMs) == EventoCinta::ObjetoDetectado) {
+        _eventoSensorPendiente = true;
+    }
 
     // Actualizar la Maquina de estados interna del actuador neumatico
     _efectorFinal.update(nowMs);
@@ -147,6 +181,7 @@ void Controller::update(uint32_t nowMs) {
 
         if (std::strcmp(comando, "STATUS") == 0) {
             enviarEstadoActualPorUart();
+            enviarEstadoCintaPorUart();
         } else {
             const CommandResult result = handleUartLine(comando, nowMs);
 
@@ -156,6 +191,24 @@ void Controller::update(uint32_t nowMs) {
         }
 
         _terminal.limpiarComandoPendiente();
+    }
+
+    // Unico punto de emision de EVT:SENSOR (despues del ACK: la PC recibe ACK_M120 y luego
+    // EVT:SENSOR cuando se arma con una caja ya presente).
+    if (_eventoSensorPendiente) {
+        _terminal.enviarNormal("EVT:SENSOR\r\n");
+        _eventoSensorPendiente = false;
+    }
+
+    // Liberacion del pick: trayectoria terminada (EOF) y retardo de asentamiento cumplido.
+    // No se usa Servo::isTargetReached(): en AutoReady los servos quedan en modo Velocity
+    // (detenerActuadoresManuales), donde siempre devuelve false, y en DirectPosition la posicion
+    // "actual" salta al setpoint sin reflejar el movimiento fisico del servo.
+    if (_pickCompletado && (_state == GlobalState::AutoReady) &&
+        ((nowMs - _tiempoFinTrayectoria) >= Config::CINTA_RETARDO_LIBERACION_MS)) {
+        _cinta.liberarPick();
+        _pickCompletado = false;
+        Logger::logDEBUG("CINTA: Trayectoria finalizada. Pick liberado.");
     }
 
     switch (_state) {
@@ -174,6 +227,9 @@ void Controller::update(uint32_t nowMs) {
         _tiempoUltimoEnvioTelemetria = nowMs;
         enviarTelemetria();
     }
+
+    // Informe de cambios de la cinta (una vez por vuelta: captura los cambios de todos los hooks)
+    reportarEstadoCinta();
 }
 // GETTERS Y AYUDAS PUBLICAS
 GlobalState Controller::getState(void) const { return _state; }
@@ -223,6 +279,9 @@ const char* Controller::toString(UartCommand command) {
         case UartCommand::M113_StopPausePlayback: return "M113";
         case UartCommand::M114_ResumePlayback:    return "M114";
         case UartCommand::M116_EndOfTrajectory:   return "M116";
+        case UartCommand::M120_ArmarCinta:        return "M120";
+        case UartCommand::M121_DesarmarCinta:     return "M121";
+        case UartCommand::M122_CintaManual:       return "M122";
         case UartCommand::M999_ResetError:        return "M999";
         case UartCommand::M00_EStop:              return "M00";
         case UartCommand::Status:                 return "STATUS";
@@ -262,6 +321,9 @@ UartCommand Controller::parseUartCommand(const char* text) {
     if (std::strcmp(cmd, "M113") == 0)   return UartCommand::M113_StopPausePlayback;
     if (std::strcmp(cmd, "M114") == 0)   return UartCommand::M114_ResumePlayback;
     if (std::strcmp(cmd, "M116") == 0)   return UartCommand::M116_EndOfTrajectory;
+    if (std::strcmp(cmd, "M120") == 0)   return UartCommand::M120_ArmarCinta;
+    if (std::strcmp(cmd, "M121") == 0)   return UartCommand::M121_DesarmarCinta;
+    if (std::strncmp(cmd, "M122", 4) == 0) return UartCommand::M122_CintaManual;	// Admite parametro S<v>
     if (std::strcmp(cmd, "M999") == 0)   return UartCommand::M999_ResetError;
     if (std::strcmp(cmd, "M00") == 0)    return UartCommand::M00_EStop;
     if (std::strcmp(cmd, "STATUS") == 0) return UartCommand::Status;
@@ -488,6 +550,14 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
         return makeAck("ACK_M999");
     }
 
+    if (command == UartCommand::M121_DesarmarCinta) {
+        // Detener la cinta es siempre seguro: se acepta en cualquier estado, incluso en
+        // Fault/Emergency (por eso se evalua antes del bloqueo de esos dos estados).
+        _cinta.desarmar();
+        _pickCompletado = false;
+        return makeAck("ACK_M121");
+    }
+
     if (command == UartCommand::Status) {
         return makeHandledNoReply();
     }
@@ -503,6 +573,14 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
 
     if (_state == GlobalState::Fault) {
         return makeErr("ERR:FAULT_ACTIVE");
+    }
+
+    if (command == UartCommand::M122_CintaManual) {
+        // Marcha manual de prueba: solo fuera del ciclo automatico y sin teleoperacion grabando
+        if ((_state == GlobalState::Idle) || (_state == GlobalState::Manual)) {
+            return procesarComandoCintaManual(rawLine, nowMs);
+        }
+        return makeErr("ERR:INVALID_STATE");
     }
 
     switch (_state) {
@@ -558,6 +636,18 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
             if (command == UartCommand::M112_StartPlayback) {
                 transitionTo(GlobalState::AutoRunning, nowMs);
                 return makeAck("ACK_M112");
+            }
+            if (command == UartCommand::M120_ArmarCinta) {
+                // Si ya hay una caja frente al sensor, su flanco ocurrio antes de armar: se
+                // re-emite EVT:SENSOR (despues del ACK) para que la PC no quede esperando.
+                if (_cinta.armar(nowMs) == EventoCinta::ObjetoDetectado) {
+                    _eventoSensorPendiente = true;
+                } else if ((_cinta.getEstado() == EstadoCinta::EsperandoPick) && _cinta.objetoPresente()) {
+                    // Re-armado idempotente con la caja esperando: re-emitir para que la PC
+                    // pueda recuperarse si perdio el EVT:SENSOR original.
+                    _eventoSensorPendiente = true;
+                }
+                return makeAck("ACK_M120");
             }
             if (command == UartCommand::M99_GoIdle) {
                 transitionTo(GlobalState::Idle, nowMs);
@@ -694,6 +784,45 @@ void Controller::enviarEstadoActualPorUart(void) {
     _terminal.enviarNormal(msg);
 }
 
+void Controller::enviarEstadoCintaPorUart(void) {
+    char msg[40];
+    std::snprintf(msg, sizeof(msg), "EVT:CINTA,%s\r\n", Cinta::toString(_cinta.getEstado()));
+    _terminal.enviarNormal(msg);
+}
+
+void Controller::reportarEstadoCinta(void) {
+    const EstadoCinta estado = _cinta.getEstado();
+    if (estado == _ultimoEstadoCintaReportado) return;
+
+    _ultimoEstadoCintaReportado = estado;
+    enviarEstadoCintaPorUart();
+}
+
+CommandResult Controller::procesarComandoCintaManual(const char* rawCommand, uint32_t nowMs) {
+    char cmd[32] = {0};
+    normalizeToUpperNoSpaces(rawCommand, cmd, sizeof(cmd));
+
+    // "M122" (velocidad nominal) o "M122S<v>" con v en [0.0, 1.0]
+    float velocidad = Config::CINTA_VELOCIDAD_NOMINAL;
+
+    if (cmd[4] == 'S') {
+        char* endPtr = nullptr;
+        velocidad = std::strtof(&cmd[5], &endPtr);
+        // !(rango) en lugar de (<0 || >1): tambien rechaza NaN ("M122SNAN")
+        if ((endPtr == &cmd[5]) || (*endPtr != '\0') || !((velocidad >= 0.0f) && (velocidad <= 1.0f))) {
+            return makeErr("ERR:PARAM");
+        }
+    } else if (cmd[4] != '\0') {
+        return makeErr("ERR:PARAM");
+    }
+
+    if (!_cinta.setVelocidadManual(velocidad, nowMs)) {
+        return makeErr("ERR:SENSOR_ACTIVO");
+    }
+
+    return makeAck("ACK_M122");
+}
+
 
 void Controller::procesarTeleoperacion(void) {
     // Ambos pulsadores se evaluan siempre (una vez por tick cada uno) para consumir
@@ -760,12 +889,16 @@ void Controller::onEnterInit(void) {
     Logger::logDEBUG("FSM -> Init");
     detenerActuadoresManuales();
     clearAutoRuntimeState();
+    _cinta.desarmar();
+    _pickCompletado = false;
 }
 
 void Controller::onEnterIdle(void) {
     Logger::logDEBUG("FSM -> Idle");
     detenerActuadoresManuales();
     clearAutoRuntimeState();
+    _cinta.desarmar();
+    _pickCompletado = false;
 
     if (_primerIngresoIdle) {
         realizarServoInitInicial();
@@ -777,10 +910,15 @@ void Controller::onEnterIdle(void) {
 
 void Controller::onEnterManual(void) {
     Logger::logDEBUG("FSM -> Manual");
+    _cinta.desarmar();
+    _pickCompletado = false;
 }
 
 void Controller::onEnterRecording(void) {
     Logger::logDEBUG("FSM -> Recording");
+    // En Recording el operador teleopera y graba: la cinta no debe moverse bajo el brazo
+    _cinta.desarmar();
+    _pickCompletado = false;
     realizarGoHomeNormal();
 }
 
@@ -788,6 +926,14 @@ void Controller::onEnterAutoReady(void) {
     Logger::logDEBUG("FSM -> AutoReady");
     detenerActuadoresManuales();
     clearAutoRuntimeState();
+
+    // Fin normal de trayectoria (AutoRunning -> AutoReady): la cinta sigue armada entre cajas y
+    // se libera via _pickCompletado. Desde cualquier otro origen (M101 desde Idle, cancelacion
+    // M113 desde AutoPaused) el ciclo se considera terminado.
+    if (_previousState != GlobalState::AutoRunning) {
+        _cinta.desarmar();
+        _pickCompletado = false;
+    }
 }
 
 void Controller::onEnterAutoRunning(void) {
@@ -799,6 +945,10 @@ void Controller::onEnterAutoRunning(void) {
      */
     if (_previousState != GlobalState::AutoPaused) {
         clearAutoRuntimeState();
+        // Una trayectoria nueva invalida cualquier liberacion pendiente (p. ej. reintento de un
+        // pick fallido: la cinta no debe arrancar cuando el brazo levante la caja).
+        _pickCompletado = false;
+        _cinta.cancelarLiberacion();
         _lastTrajectoryTick = HAL_GetTick(); // Inicia el reloj principal
         _lastFifoDataTick = HAL_GetTick();   // Arranca limpio el reloj de subalimentacion
         Logger::logDEBUG("AUTO_RUNNING: FIFO inicializada. Listo para solicitar 1er chunk...");
@@ -822,6 +972,10 @@ void Controller::onEnterFault(void) {
     // seguridad debe soltar/despresurizar por defecto, no mantener lo que tenia).
     _efectorFinal.commandIdle();
 
+    // Detener la cinta: ningun estado de seguridad debe dejar material en movimiento.
+    _cinta.desarmar();
+    _pickCompletado = false;
+
     clearAutoRuntimeState();
     _terminal.enviarNormal("EVT:FAULT\r\n");
 }
@@ -832,6 +986,10 @@ void Controller::onEnterEmergency(void) {
 
     // Cortar energia a actuador final
     _efectorFinal.commandIdle();
+
+    // Detener la cinta de inmediato (frenado sin rampa)
+    _cinta.desarmar();
+    _pickCompletado = false;
 
     clearAutoRuntimeState();
 
@@ -880,6 +1038,8 @@ void Controller::onUpdateAutoRunning(void) {
         } else if (_endOfTrajectoryPending) {
             // FIFO vacia y confirmado que no llegaran mas puntos (M116): trayectoria completa.
             Logger::logDEBUG("AUTO_RUNNING: FIFO vacia con EOF confirmado. Trayectoria completa.");
+            _pickCompletado = true;     // La cinta se libera tras CINTA_RETARDO_LIBERACION_MS
+            _tiempoFinTrayectoria = nowMs;
             transitionTo(GlobalState::AutoReady, nowMs);
             _terminal.enviarNormal("EVT:AUTO_COMPLETE\r\n");
             return;

@@ -63,11 +63,14 @@ namespace Config {
 	// cambia el duty efectivo de CINTA_VELOCIDAD_NOMINAL.
 	constexpr uint32_t CINTA_MIN_CCR = 0U;
 
+	// Retardo entre el fin de la trayectoria (FIFO vacia tras M116) y la liberacion de la cinta.
+	// En reproduccion automatica los servos se comandan en DirectPosition (sin realimentacion ni
+	// limite de slew), asi que el firmware no puede saber cuando el brazo llego fisicamente a
+	// Home: se espera un tiempo fijo para que el servo real asiente antes de mover la cinta.
+	constexpr uint32_t CINTA_RETARDO_LIBERACION_MS = 500U;
+
 	// Antirrebote del sensor IR de fin de cinta (FC-51, activo en bajo, PB12).
 	constexpr uint32_t SENSOR_IR_DEBOUNCE_MS = 30U;
-
-	// Modo de prueba aislada de la clase Cinta (sin StationController). Solo para bring-up.
-	constexpr bool CINTA_BRINGUP = true;
 
 	/**
 	 * ======== CALIBRACION DE ENTRADAS ANALOGICAS (JOYSTICKS) ========

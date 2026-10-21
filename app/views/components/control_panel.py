@@ -43,14 +43,13 @@ class ControlPanel(QWidget):
     request_stop_recording = Signal()
     request_load_trajectory = Signal(str) # envia nombre de archivo
 
-    # Senales de Paletizado
+    # Senales de Ciclo Automatico (trayectoria unica o receta, disparado por el sensor)
     request_load_recipe = Signal(list)
-    request_start_palletizing = Signal()
-    request_stop_palletizing = Signal()
+    request_start_palletizing = Signal()    # INICIAR CICLO
+    request_stop_palletizing = Signal()     # DETENER CICLO
     request_unload_memory = Signal()
 
     # Senales de Ejecucion
-    request_execute_auto = Signal()
     request_simulate_trajectory = Signal()  # Llama a simulate_trajectory()
     request_stop_simulation = Signal()
     request_pause_trajectory = Signal()     # Llama a stop_trajectory()
@@ -60,6 +59,22 @@ class ControlPanel(QWidget):
     # Senales de Jogging
     request_jog = Signal(str, int, float)
     request_toggle_actuator = Signal()
+    request_toggle_conveyor = Signal()      # MARCHA/PARADA manual de la cinta (M122)
+
+    # Presentacion de los estados de la cinta (EVT:CINTA) -> (texto, color)
+    _CONVEYOR_VIEW = {
+        "DESCONOCIDO":    ("DESCONOCIDO",    AppConfig.COLORS.TEXT_MED),
+        "DESHABILITADA":  ("DETENIDA",       AppConfig.COLORS.TEXT_MED),
+        "AVANZANDO":      ("AVANZANDO",      AppConfig.COLORS.SEMANTIC_AUTO),
+        "ESPERANDO_PICK": ("ESPERANDO PICK", AppConfig.COLORS.SEMANTIC_RECORD),
+        "MANUAL":         ("MARCHA MANUAL",  AppConfig.COLORS.SEMANTIC_MANUAL),
+    }
+
+    # Estilo de boton deshabilitado (visible: Qt no soporta 'opacity' en QSS de QPushButton)
+    _DISABLED_BTN_STYLE = (
+        "background-color: #1A1A1A; color: #555555; border: 1px solid #2A2A2A;"
+        "border-radius: 4px; font-weight: bold;"
+    )
 
     # ==== INICIALIZACION Y LAYOUT MAESTRO ====
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -77,6 +92,11 @@ class ControlPanel(QWidget):
         self._jog_mode = "ARTICULAR"    # Estado del sistema de coordenadas
 
         self._actuator_is_on = False  # Estado de los actuadores (para lógica de botones)
+
+        self._conveyor_state = "DESCONOCIDO"    # Ultimo EVT:CINTA recibido
+        self._conveyor_enabled = False          # Boton MARCHA/PARADA habilitado (IDLE/MANUAL)
+
+        self._has_file_loaded = False           # Hay trayectoria o receta en memoria
 
         # Firma del ultimo render aplicado en update_machine_state, para no reaplicar estilos
         # cuando nada relevante cambio desde la llamada anterior (ver update_machine_state).
@@ -270,9 +290,75 @@ class ControlPanel(QWidget):
         
         layout.addWidget(self.frame_actuator)
 
+        # --- TARJETA DE CINTA TRANSPORTADORA ---
+        layout.addWidget(self._create_conveyor_card())
+
         # Empuja todo hacia arriba si sobra espacion en la seccion
         layout.addStretch()
         return container
+
+    def _create_conveyor_card(self) -> QFrame:
+        """
+        Tarjeta de la cinta transportadora: estado en vivo (siempre visible) y marcha/parada
+        manual, habilitada solo fuera del ciclo automatico (IDLE/MANUAL).
+        """
+        self.frame_conveyor = QFrame()
+        self.frame_conveyor.setFixedHeight(64)  # Misma altura que la tarjeta del actuador
+        self.frame_conveyor.setStyleSheet(
+            f"QFrame {{"
+            f"  background-color: #1A1A1A;"
+            f"  border: 1px solid {AppConfig.COLORS.BORDERS};"
+            f"  border-radius: 8px;"
+            f"}}"
+        )
+
+        conveyor_layout = QHBoxLayout(self.frame_conveyor)
+        conveyor_layout.setContentsMargins(16, 0, 16, 0)
+        conveyor_layout.setSpacing(8)
+
+        lbl_conveyor = QLabel("CINTA TRANSPORTADORA")
+        lbl_conveyor.setStyleSheet(
+            f"color: {AppConfig.COLORS.TEXT_MED};"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
+            f"font-size: 14px;"
+            f"font-weight: {AppConfig.TYPOGRAPHY.WEIGHT_SEMIBOLD};"
+            f"border: none;"
+        )
+
+        # Indicador de estado (punto + texto)
+        self.lbl_conveyor_icon = QLabel("●")
+        self.lbl_conveyor_state = QLabel()
+
+        # Boton Toggle MARCHA / PARADA
+        self.btn_conveyor = QPushButton("MARCHA")
+        self.btn_conveyor.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_conveyor.setFixedSize(100, 36)
+        self.btn_conveyor.clicked.connect(self.request_toggle_conveyor.emit)
+
+        # Columna izquierda en dos lineas: titulo arriba, estado abajo (no se trunca en
+        # pantallas angostas y no agrega altura respecto de la tarjeta del actuador)
+        info_layout = QVBoxLayout()
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(2)
+
+        state_layout = QHBoxLayout()
+        state_layout.setContentsMargins(0, 0, 0, 0)
+        state_layout.setSpacing(6)
+        state_layout.addWidget(self.lbl_conveyor_icon)
+        state_layout.addWidget(self.lbl_conveyor_state)
+        state_layout.addStretch()
+
+        info_layout.addStretch()
+        info_layout.addWidget(lbl_conveyor)
+        info_layout.addLayout(state_layout)
+        info_layout.addStretch()
+
+        conveyor_layout.addLayout(info_layout)
+        conveyor_layout.addStretch()
+        conveyor_layout.addWidget(self.btn_conveyor)
+
+        self._render_conveyor()
+        return self.frame_conveyor
 
     def _create_memory_section(self) -> QWidget:
         """
@@ -359,34 +445,29 @@ class ControlPanel(QWidget):
         self.stack_abort.addWidget(self.btn_stop_sim)   # 1
         self.stack_abort.addWidget(self.btn_cancel)     # 2
 
-        # --- FILA 2, COLUMNA 1: Stack de Ejecución ---
+        # --- FILA 2, COLUMNA 1: Stack de Ejecución (Ciclo automatico por sensor) ---
         self.stack_execute = QStackedWidget()
-        
-        # 0: Ejecutar (Verde)
-        self.btn_execute = self._create_button("EJECUTAR", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, "#34C759")
-        self.btn_execute.clicked.connect(self.request_execute_auto.emit)
-        
+
+        # 0: Iniciar Ciclo (Verde). Arma la cinta; cada caja detectada dispara la trayectoria.
+        self.btn_start_cycle = self._create_button("INICIAR CICLO", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, "#34C759")
+        self.btn_start_cycle.clicked.connect(self.request_start_palletizing.emit)
+
         # 1: Pausar (Ambar)
         self.btn_pause = self._create_button("PAUSAR", "#2A2A2A", "#FF9500", "#FF9500")
         self.btn_pause.clicked.connect(self.request_pause_trajectory.emit)
-        
+
         # 2: Reanudar (Verde)
-        self.btn_resume = self._create_button("REANUDAR", "#1E1E1E", {AppConfig.COLORS.TEXT_HIGH}, "#34C759")
+        self.btn_resume = self._create_button("REANUDAR", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, "#34C759")
         self.btn_resume.clicked.connect(self.request_resume_trajectory.emit)
-        
-        # 3: Armar Pallet
-        self.btn_arm_pallet = self._create_button("ARMAR PALLET", "#1E1E1E", AppConfig.COLORS.TEXT_HIGH, "#A259FF") 
-        self.btn_arm_pallet.clicked.connect(self.request_start_palletizing.emit)
 
-        # 4: Detener Pallet
-        self.btn_stop_pallet = self._create_button("DETENER PALLET", "#2A2A2A", "#FF3B30", "#FF3B30")
-        self.btn_stop_pallet.clicked.connect(self.request_stop_palletizing.emit)
+        # 3: Detener Ciclo (Rojo). Visible mientras se espera la proxima caja.
+        self.btn_stop_cycle = self._create_button("DETENER CICLO", "#2A2A2A", "#FF3B30", "#FF3B30")
+        self.btn_stop_cycle.clicked.connect(self.request_stop_palletizing.emit)
 
-        self.stack_execute.addWidget(self.btn_execute)     # 0
-        self.stack_execute.addWidget(self.btn_pause)       # 1
-        self.stack_execute.addWidget(self.btn_resume)      # 2
-        self.stack_execute.addWidget(self.btn_arm_pallet)  # 3
-        self.stack_execute.addWidget(self.btn_stop_pallet) # 4
+        self.stack_execute.addWidget(self.btn_start_cycle)  # 0
+        self.stack_execute.addWidget(self.btn_pause)        # 1
+        self.stack_execute.addWidget(self.btn_resume)       # 2
+        self.stack_execute.addWidget(self.btn_stop_cycle)   # 3
 
         # Configuramos políticas para que todos llenen su celda
         policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -412,10 +493,12 @@ class ControlPanel(QWidget):
         btn = QPushButton(text)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         border = "none" if border_color == "none" else f"1px solid {border_color}"
-        btn.setStyleSheet(
+        style = (
             f"background-color: {bg_color}; color: {text_color}; "
             f"border: {border}; border-radius: 4px; font-weight: bold;"
         )
+        btn.setStyleSheet(style)
+        btn.setProperty("base_style", style)    # Para restaurarlo al re-habilitar
         return btn
     
     def _apply_inactive_styles(self) -> None:
@@ -458,17 +541,19 @@ class ControlPanel(QWidget):
         Limpia estados previos para evitar acumulación de estilos.
         """
         btn.setEnabled(enabled)
-        # Limpiamos cualquier opacidad previa
-        base_style = btn.styleSheet().replace(" opacity: 0.5;", "")
-        
-        # Aplicamos la opacidad solo si está deshabilitado
-        if not enabled:
-            base_style += " opacity: 0.5;"
-            
-        btn.setStyleSheet(base_style)
+
+        # Botones de accion (_create_button) guardan su estilo base; los de modo no, y su
+        # estilo vigente lo acaba de aplicar update_machine_state.
+        base_style = btn.property("base_style") or btn.styleSheet()
+        btn.setStyleSheet(base_style if enabled else self._DISABLED_BTN_STYLE)
 
     def _update_actuator_button_style(self) -> None:
         """Aplica estilos dinámicos dependiendo de si está encendido o apagado."""
+        # Bloqueado (fuera de MANUAL): conserva el estilo apagado/gris de update_machine_state
+        # aunque el actuador cambie durante una trayectoria automatica.
+        if hasattr(self, '_last_render_signature') and self._last_render_signature is not None \
+                and not self.btn_actuator.isEnabled():
+            return
         if self._actuator_is_on:
             self.btn_actuator.setText("ENCENDIDO")
             self.btn_actuator.setStyleSheet(
@@ -494,19 +579,18 @@ class ControlPanel(QWidget):
     
     
     # ==== ACTUALIZACIONES DE ESTADO (SLOTS UI) ====
-    def update_machine_state(self, current_state, progress: int = 0, is_recipe_mode: bool = False) -> None:
+    def update_machine_state(self, current_state, progress: int = 0) -> None:
         """
         Actualiza el diseño visual del Segmented Control para reflejar el estado actual.
         Llamado asíncronamente cuando llega nueva telemetría (hasta ~20-50 veces/seg).
         """
         state_name = current_state.name if hasattr(current_state, 'name') else str(current_state)
-        current_label_text = self.lbl_loaded_file.text()
-        has_file_loaded = current_label_text != "ARCHIVO: [ NINGUNO ]"
+        has_file_loaded = self._has_file_loaded
 
         # Firma de todo lo que influye en el resultado visual de este metodo. Si nada de esto
         # cambio desde la ultima llamada, evitamos recalcular y reaplicar decenas de
         # setStyleSheet() en cada tick de telemetria (el costo real del "parpadeo"/lentitud de UI).
-        signature = (state_name, progress > 0, is_recipe_mode, has_file_loaded)
+        signature = (state_name, progress > 0, has_file_loaded)
         if signature == self._last_render_signature:
             return
         self._last_render_signature = signature
@@ -545,50 +629,46 @@ class ControlPanel(QWidget):
         can_manage_memory = (state_name == "AUTO_READY")
         self._set_button_enabled(self.stack_load.currentWidget(), can_manage_memory)
 
-        # 3. LÓGICA DE EJECUCIÓN, SIMULACION Y PALLETIZADO
+        # 3. LÓGICA DE EJECUCIÓN, SIMULACION Y CICLO AUTOMATICO
         if state_name == "AUTO_READY":
+            self.stack_execute.setCurrentIndex(0)   # INICIAR CICLO
             if progress > 0:
                 # Simulando
                 self.stack_abort.setCurrentIndex(1)  # DETENER SIM.
-                self.stack_execute.setCurrentIndex(0)
                 self._set_button_enabled(self.btn_simulate, False)
-                self._set_button_enabled(self.btn_execute, False)
-
+                self._set_button_enabled(self.btn_start_cycle, False)
             else:
                 self.stack_abort.setCurrentIndex(0)  # SIMULAR
-                self._set_button_enabled(self.btn_simulate, True)
-
-                if is_recipe_mode:
-                    self.stack_execute.setCurrentIndex(3)  # ARMAR PALLET
-                else:
-                    self.stack_execute.setCurrentIndex(0)  # EJECUTAR
-            
-                # Activamos el boton correspondiente
-                self._set_button_enabled(self.stack_execute.currentWidget(), True)
+                self._set_button_enabled(self.btn_simulate, has_file_loaded)
+                self._set_button_enabled(self.btn_start_cycle, has_file_loaded)
 
         elif state_name == "AUTO_WAITING_SENSOR":
-            # El sistema está armado y esperando la caja
+            # Ciclo armado: la cinta avanza y se espera la proxima caja
             self.stack_abort.setCurrentIndex(0)
-            self.stack_execute.setCurrentIndex(4) # DETENER PALLET
-            self._set_button_enabled(self.btn_simulate, False) # No se simula cuando está armado
+            self.stack_execute.setCurrentIndex(3)   # DETENER CICLO
+            self._set_button_enabled(self.btn_simulate, False)
+            self._set_button_enabled(self.btn_stop_cycle, True)
 
         elif state_name == "AUTO_RUNNING":
-            # Ejecutándose. Cambia Ejecutar por PAUSAR. Bloquea Simular.
+            # Ejecutándose. Muestra PAUSAR. Bloquea Simular.
             self.stack_abort.setCurrentIndex(0)
             self.stack_execute.setCurrentIndex(1)   # PAUSAR
             self._set_button_enabled(self.btn_simulate, False)
+            self._set_button_enabled(self.btn_pause, True)
 
         elif state_name == "AUTO_PAUSED":
-            # Pausado. Aparece CANCELAR y REANUDAR.
+            # Pausado. Aparece CANCELAR (termina el ciclo) y REANUDAR.
             self.stack_abort.setCurrentIndex(2)     # CANCELAR
             self.stack_execute.setCurrentIndex(2)   # REANUDAR
+            self._set_button_enabled(self.btn_cancel, True)
+            self._set_button_enabled(self.btn_resume, True)
 
         else:
-            # Cualquier otro estado (IDLE, MANUAL, RECORDING). Todo bloqueado.
+            # Cualquier otro estado (IDLE, MANUAL, RECORDING, FAULT...). Todo bloqueado.
             self.stack_abort.setCurrentIndex(0)
             self.stack_execute.setCurrentIndex(0)
             self._set_button_enabled(self.btn_simulate, False)
-            self._set_button_enabled(self.btn_execute, False)
+            self._set_button_enabled(self.btn_start_cycle, False)
 
         # 3b. BLOQUEO TOTAL DE MODOS DURANTE FAULT/EMERGENCY
         # Sin esto los 3 botones de modo quedaban clickeables (inofensivo, RobotController los
@@ -624,6 +704,10 @@ class ControlPanel(QWidget):
             else:
                 # Si entramos a MANUAL, restauramos su color normal (Encendido o Apagado)
                 self._update_actuator_button_style()
+
+        # 5. MARCHA MANUAL DE LA CINTA (solo fuera del ciclo automatico)
+        self._conveyor_enabled = state_name in ("IDLE", "MANUAL")
+        self._render_conveyor()
 
     def set_connection_state(self, is_connected: bool) -> None:
         """
@@ -670,6 +754,9 @@ class ControlPanel(QWidget):
         Ej: {'type': 'SINGLE', 'name': 'caja_1'} 
         o {'type': 'RECIPE', 'count': 4, 'current': 1, 'pallets': 0}
         """
+        self._has_file_loaded = bool(payload)
+        self._last_render_signature = None      # Fuerza re-render de botones con la nueva carga
+
         # 1. Si llega None o vacío, reiniciamos el estado
         if not payload:
             self.lbl_loaded_file.setText("ARCHIVO: [ NINGUNO ]")
@@ -692,7 +779,11 @@ class ControlPanel(QWidget):
         
         if payload_type == 'SINGLE':
             filename = payload.get('name', 'DESCONOCIDO')
-            self.lbl_loaded_file.setText(f"ARCHIVO: [ {filename.upper()} ]")
+            boxes = payload.get('boxes', 0)
+            text = f"ARCHIVO: [ {filename.upper()} ]"
+            if boxes:
+                text += f" | CAJAS: {boxes}"
+            self.lbl_loaded_file.setText(text)
             
         elif payload_type == 'RECIPE':
             # Muestra feedback de estación de palletizado en vivo
@@ -701,6 +792,44 @@ class ControlPanel(QWidget):
             pallets = payload.get('pallets', 0)
             
             self.lbl_loaded_file.setText(f"RECETA: [ CAJA {current}/{count} ] | PALLETS: {pallets}")
+
+    def update_conveyor_state(self, state: str) -> None:
+        """
+        Slot (hilo de la GUI) con el estado de la cinta reportado por el firmware (EVT:CINTA).
+        """
+        self._conveyor_state = state
+        self._render_conveyor()
+
+    def _render_conveyor(self) -> None:
+        """Aplica el estado de la cinta y la habilitacion del boton a la tarjeta."""
+        text, color = self._CONVEYOR_VIEW.get(self._conveyor_state, (self._conveyor_state, AppConfig.COLORS.TEXT_MED))
+
+        self.lbl_conveyor_icon.setStyleSheet(f"color: {color}; font-size: 14px; border: none; background: transparent;")
+        self.lbl_conveyor_state.setText(text)
+        self.lbl_conveyor_state.setStyleSheet(
+            f"color: {color}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
+            f"font-size: 12px; font-weight: bold; border: none; background: transparent;"
+        )
+
+        running_manual = (self._conveyor_state == "MANUAL")
+        self.btn_conveyor.setText("PARADA" if running_manual else "MARCHA")
+        self.btn_conveyor.setEnabled(self._conveyor_enabled)
+
+        if not self._conveyor_enabled:
+            style = "background-color: #1A1A1A; color: #555555; border: none;"
+        elif running_manual:
+            style = (
+                f"background-color: rgba(0, 240, 255, 0.15);"
+                f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};"
+                f"border: 1px solid {AppConfig.COLORS.SEMANTIC_MANUAL};"
+            )
+        else:
+            style = "background-color: #2A2A2A; color: #A0A0A0; border: none;"
+
+        self.btn_conveyor.setStyleSheet(
+            f"{style} border-radius: 4px;"
+            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; font-size: 12px;"
+        )
 
     def update_telemetry(self, joints: list[float], tcp: list[float]) -> None:
         """
