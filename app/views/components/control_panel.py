@@ -58,7 +58,6 @@ class ControlPanel(QWidget):
 
     # Senales de Jogging
     request_jog = Signal(str, int, float)
-    request_toggle_actuator = Signal()
     request_toggle_conveyor = Signal()      # MARCHA/PARADA manual de la cinta (M122)
 
     # Presentacion de los estados de la cinta (EVT:CINTA) -> (texto, color)
@@ -91,7 +90,7 @@ class ControlPanel(QWidget):
         self._is_connected = False      # Estado logico interno de la UI
         self._jog_mode = "ARTICULAR"    # Estado del sistema de coordenadas
 
-        self._actuator_is_on = False  # Estado de los actuadores (para lógica de botones)
+        self._actuator_is_on = False  # Estado del actuador reportado por telemetria (A1)
 
         self._conveyor_state = "DESCONOCIDO"    # Ultimo EVT:CINTA recibido
         self._conveyor_enabled = False          # Boton MARCHA/PARADA habilitado (IDLE/MANUAL)
@@ -262,10 +261,12 @@ class ControlPanel(QWidget):
             f"}}"
         )
         
-        actuator_layout = QHBoxLayout(self.frame_actuator)
+        # Solo indicador (estado por telemetria): el efector se acciona con el pulsador derecho
+        # del joystick en MANUAL/RECORDING o lo comanda la trayectoria en AUTO.
+        actuator_layout = QVBoxLayout(self.frame_actuator)
         actuator_layout.setContentsMargins(16, 0, 16, 0)
-        
-        # Etiqueta de la herramienta
+        actuator_layout.setSpacing(2)
+
         lbl_actuator = QLabel("ACTUADOR FINAL")
         lbl_actuator.setStyleSheet(
             f"color: {AppConfig.COLORS.TEXT_MED};"
@@ -274,19 +275,23 @@ class ControlPanel(QWidget):
             f"font-weight: {AppConfig.TYPOGRAPHY.WEIGHT_SEMIBOLD};"
             f"border: none;"
         )
-        
-        # Botón Toggle
-        self.btn_actuator = QPushButton("APAGADO")
-        self.btn_actuator.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_actuator.setFixedSize(100, 36)
-        self.btn_actuator.clicked.connect(self._on_actuator_clicked)
-        
-        # Aplicamos el estilo inicial (Apagado)
-        self._update_actuator_button_style()
-        
-        actuator_layout.addWidget(lbl_actuator)
+
+        self.lbl_actuator_icon = QLabel("●")
+        self.lbl_actuator_state = QLabel()
+
+        state_layout = QHBoxLayout()
+        state_layout.setContentsMargins(0, 0, 0, 0)
+        state_layout.setSpacing(6)
+        state_layout.addWidget(self.lbl_actuator_icon)
+        state_layout.addWidget(self.lbl_actuator_state)
+        state_layout.addStretch()
+
         actuator_layout.addStretch()
-        actuator_layout.addWidget(self.btn_actuator)
+        actuator_layout.addWidget(lbl_actuator)
+        actuator_layout.addLayout(state_layout)
+        actuator_layout.addStretch()
+
+        self._render_actuator()
         
         layout.addWidget(self.frame_actuator)
 
@@ -547,35 +552,15 @@ class ControlPanel(QWidget):
         base_style = btn.property("base_style") or btn.styleSheet()
         btn.setStyleSheet(base_style if enabled else self._DISABLED_BTN_STYLE)
 
-    def _update_actuator_button_style(self) -> None:
-        """Aplica estilos dinámicos dependiendo de si está encendido o apagado."""
-        # Bloqueado (fuera de MANUAL): conserva el estilo apagado/gris de update_machine_state
-        # aunque el actuador cambie durante una trayectoria automatica.
-        if hasattr(self, '_last_render_signature') and self._last_render_signature is not None \
-                and not self.btn_actuator.isEnabled():
-            return
-        if self._actuator_is_on:
-            self.btn_actuator.setText("ENCENDIDO")
-            self.btn_actuator.setStyleSheet(
-                f"background-color: rgba(0, 240, 255, 0.15);" # Fondo cian translúcido
-                f"color: {AppConfig.COLORS.SEMANTIC_MANUAL};" # Cian brillante
-                f"border: 1px solid {AppConfig.COLORS.SEMANTIC_MANUAL};"
-                f"border-radius: 4px;"
-                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
-                f"font-weight: bold;"
-                f"font-size: 12px;"
-            )
-        else:
-            self.btn_actuator.setText("APAGADO")
-            self.btn_actuator.setStyleSheet(
-                f"background-color: #2A2A2A;"
-                f"color: #A0A0A0;"
-                f"border: none;"
-                f"border-radius: 4px;"
-                f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI};"
-                f"font-weight: bold;"
-                f"font-size: 12px;"
-            )
+    def _render_actuator(self) -> None:
+        """Aplica el estado del actuador (ENCENDIDO/APAGADO) al indicador de la tarjeta."""
+        color = AppConfig.COLORS.SEMANTIC_MANUAL if self._actuator_is_on else AppConfig.COLORS.TEXT_MED
+        self.lbl_actuator_icon.setStyleSheet(f"color: {color}; font-size: 14px; border: none; background: transparent;")
+        self.lbl_actuator_state.setText("ENCENDIDO" if self._actuator_is_on else "APAGADO")
+        self.lbl_actuator_state.setStyleSheet(
+            f"color: {color}; font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
+            f"font-size: 12px; font-weight: bold; border: none; background: transparent;"
+        )
     
     
     # ==== ACTUALIZACIONES DE ESTADO (SLOTS UI) ====
@@ -690,20 +675,6 @@ class ControlPanel(QWidget):
         # Bloquear/Habilitar botón de Modo Articular/Cartesiano
         if hasattr(self, 'btn_jog_mode'):
             self.btn_jog_mode.setEnabled(is_manual)
-
-        # Bloquear/Habilitar botón del Actuador Final
-        if hasattr(self, 'btn_actuator'):
-            self.btn_actuator.setEnabled(is_manual)
-
-            # Feedback visual extra para el actuador cuando está bloqueado
-            if not is_manual:
-                self.btn_actuator.setStyleSheet(
-                    f"background-color: #1A1A1A; color: #555555; border: none; border-radius: 4px;"
-                    f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_UI}; font-weight: bold; font-size: 12px;"
-                )
-            else:
-                # Si entramos a MANUAL, restauramos su color normal (Encendido o Apagado)
-                self._update_actuator_button_style()
 
         # 5. MARCHA MANUAL DE LA CINTA (solo fuera del ciclo automatico)
         self._conveyor_enabled = state_name in ("IDLE", "MANUAL")
@@ -847,9 +818,9 @@ class ControlPanel(QWidget):
         Llamado asíncronamente por el backend si el actuador cambia de estado
         por motivos externos (ej. Telemetría o Rutina automática).
         """
-        if getattr(self, '_actuator_is_on', None) != is_on:
+        if self._actuator_is_on != is_on:
             self._actuator_is_on = is_on
-            self._update_actuator_button_style()
+            self._render_actuator()
 
             
     # ==== EVENTOS DE INTERACCION (CLICKS) ====
@@ -884,9 +855,5 @@ class ControlPanel(QWidget):
         """Slot interno que emite la intención del usuario hacia el orquestador."""
         # Si NO estamos conectados, solicitamos conexión (True), y viceversa.
         self.request_connection.emit(not self._is_connected)
-
-    def _on_actuator_clicked(self) -> None:
-        """Invierte el estado interno y emite la orden al backend."""
-        self.request_toggle_actuator.emit()
 
 

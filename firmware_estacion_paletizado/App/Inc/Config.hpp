@@ -45,6 +45,9 @@ namespace Config {
 	constexpr float SERVO_CODO_MAX_SPEED = 10.0f;
 	constexpr int32_t SERVO_CODO_ACCEL_DIVISOR = 8;
 
+	// Tolerancia para considerar el robot en Home (misma que la validacion Return-To-Home de la PC)
+	constexpr float HOME_TOLERANCIA_GRADOS = 2.0f;
+
 	// Actuador
 
 	/**
@@ -71,6 +74,15 @@ namespace Config {
 
 	// Antirrebote del sensor IR de fin de cinta (FC-51, activo en bajo, PB12).
 	constexpr uint32_t SENSOR_IR_DEBOUNCE_MS = 30U;
+
+	/**
+	 * ======== SEGURIDAD ========
+	 */
+	// Watchdog independiente (IWDG, oscilador LSI ~40 kHz, rango 30-60 kHz): prescaler /32 y recarga
+	// 1250 -> ~1 s nominal (0.67 s en el peor caso). El loop principal dura < 1 ms y no tiene esperas
+	// bloqueantes: solo dispara si el firmware se cuelga, y el reset deja las salidas PWM apagadas.
+	constexpr uint32_t IWDG_PRESCALER_DIV32 = 3U;
+	constexpr uint32_t IWDG_RECARGA = 1250U;
 
 	/**
 	 * ======== CALIBRACION DE ENTRADAS ANALOGICAS (JOYSTICKS) ========

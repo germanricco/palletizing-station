@@ -226,6 +226,7 @@ private:
     void detenerActuadoresManuales(void);
     void realizarServoInitInicial(void);
     void realizarGoHomeNormal(void);
+    bool robotEnHome(void) const;
     void enviarTelemetria(void);
     void enviarEstadoActualPorUart(void);
     void procesarTeleoperacion(void);

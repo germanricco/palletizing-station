@@ -87,7 +87,12 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  /* Falla del nucleo: cortar la potencia de bomba (CH1), valvula (CH2) y cinta (CH3).
+   * Los timers siguen generando PWM aunque el CPU quede detenido aca. Los servos (TIM3) siguen
+   * sosteniendo la posicion para que el brazo no se desplome. */
+  TIM2->CCR1 = 0U;
+  TIM2->CCR2 = 0U;
+  TIM2->CCR3 = 0U;
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {

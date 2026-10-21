@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cctype>
 #include <cstdlib>
+#include <cmath>
 
 namespace Station {
 
@@ -29,7 +30,7 @@ namespace Station {
  *   Idle --M101--> AutoReady
  *   Idle --M98-->  Init
  *
- *   Manual --M110--> Recording
+ *   Manual --M110 [robot en Home]--> Recording   (si no: ERR:NOT_AT_HOME)
  *   Manual --M99-->  Idle
  *   Manual --M98-->  Init
  *
@@ -94,6 +95,19 @@ namespace Station {
  *   Desarme automatico al entrar a Init, Idle, Manual, Recording, Fault y Emergency, y a
  *   AutoReady salvo que se venga de AutoRunning (fin normal de trayectoria: queda armada
  *   entre cajas). Cada cambio de estado de la cinta se informa con EVT:CINTA,<ESTADO>.
+ *
+ * ESTADO SEGURO POR ESTADO:
+ *   Estado              Servos              Efector       Cinta                 Joystick
+ *   Init                sostienen posicion  apagado       desarmada             no
+ *   Idle                van a Home          sin cambios   desarmada (M122 ok)   no
+ *   Manual/Recording    joystick            joystick      desarmada (M122 Man.) si
+ *   AutoReady           sostienen posicion  sin cambios   armable (M120)        no
+ *   AutoRunning         trayectoria         trayectoria   detenida en el pick   no
+ *   AutoPaused          sostienen posicion  sin cambios   detenida              no
+ *   Fault/Emergency     sostienen posicion  apagado       desarmada             no
+ *
+ *   Fuera de la FSM: el watchdog (IWDG, ~1 s) resetea el micro si el loop se cuelga, y los
+ *   handlers de falla (HardFault/Error_Handler) cortan bomba, valvula y cinta (TIM2 CCR=0).
  * ================================================================
  */
 
@@ -608,6 +622,10 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
 
         case GlobalState::Manual:
             if (command == UartCommand::M110_StartRecording) {
+                // La trayectoria grabada debe empezar y terminar en Home (requisito RTH de la PC)
+                if (_homingActive || !robotEnHome()) {
+                    return makeErr("ERR:NOT_AT_HOME");
+                }
                 transitionTo(GlobalState::Recording, nowMs);
                 return makeAck("ACK_M110");
             }
@@ -753,6 +771,12 @@ void Controller::realizarGoHomeNormal(void) {
     _servoCodo.goHome();
 }
 
+bool Controller::robotEnHome(void) const {
+    return (std::fabs(_servoBase.getAngleDegrees()   - Config::SERVO_BASE_HOME_ANGLE)   <= Config::HOME_TOLERANCIA_GRADOS) &&
+           (std::fabs(_servoHombro.getAngleDegrees() - Config::SERVO_HOMBRO_HOME_ANGLE) <= Config::HOME_TOLERANCIA_GRADOS) &&
+           (std::fabs(_servoCodo.getAngleDegrees()   - Config::SERVO_CODO_HOME_ANGLE)   <= Config::HOME_TOLERANCIA_GRADOS);
+}
+
 void Controller::enviarTelemetria(void) {
 	// Buffer de mensaje
     char msg[96];
@@ -888,6 +912,10 @@ void Controller::onEnterBoot(void) {
 void Controller::onEnterInit(void) {
     Logger::logDEBUG("FSM -> Init");
     detenerActuadoresManuales();
+
+    // Estado seguro de espera: sin energia en el efector (simetrico con Fault/Emergency)
+    _efectorFinal.commandIdle();
+
     clearAutoRuntimeState();
     _cinta.desarmar();
     _pickCompletado = false;
@@ -919,7 +947,7 @@ void Controller::onEnterRecording(void) {
     // En Recording el operador teleopera y graba: la cinta no debe moverse bajo el brazo
     _cinta.desarmar();
     _pickCompletado = false;
-    realizarGoHomeNormal();
+    // Sin homing: la guarda de M110 garantiza que la grabacion arranca en Home
 }
 
 void Controller::onEnterAutoReady(void) {

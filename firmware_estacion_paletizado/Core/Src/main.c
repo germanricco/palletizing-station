@@ -507,6 +507,11 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  /* Error irrecuperable: cortar la potencia de bomba (CH1), valvula (CH2) y cinta (CH3), que
+   * de otro modo seguirian con el ultimo PWM. Los servos (TIM3) sostienen la posicion. */
+  TIM2->CCR1 = 0U;
+  TIM2->CCR2 = 0U;
+  TIM2->CCR3 = 0U;
   __disable_irq();
   while (1)
   {

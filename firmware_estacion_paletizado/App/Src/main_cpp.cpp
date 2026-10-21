@@ -136,6 +136,32 @@ void Cpp_Main_Init(void) {
     // Mensaje Inicial
     terminal.enviarNormal(
         "PROTO: M98 M99 M100 M101 M110 M111 M112 M113 M114 M116 M120 M121 M122 M999 M00 STATUS\r\n");
+
+    // Causa del arranque (RCC_CSR). Si la PC estaba conectada, EVT:BOOT le avisa que el
+    // firmware se reinicio (p. ej. por el watchdog) y que su estado ya no es valido.
+    // El IWDG tambien activa PINRSTF, por eso se evalua primero.
+    const uint32_t causaReset = RCC->CSR;
+    const char* causa = "OTRO";
+    if ((causaReset & RCC_CSR_IWDGRSTF) != 0U)      causa = "WATCHDOG";
+    else if ((causaReset & RCC_CSR_SFTRSTF) != 0U)  causa = "SOFTWARE";
+    else if ((causaReset & RCC_CSR_PORRSTF) != 0U)  causa = "ENCENDIDO";
+    else if ((causaReset & RCC_CSR_PINRSTF) != 0U)  causa = "PIN_RESET";
+    RCC->CSR |= RCC_CSR_RMVF;                // Limpia las banderas para el proximo arranque
+
+    char msgBoot[32];
+    std::snprintf(msgBoot, sizeof(msgBoot), "EVT:BOOT,%s\r\n", causa);
+    terminal.enviarNormal(msgBoot);
+
+    // Watchdog: se arranca al final para que la inicializacion no cuente en su ventana.
+    // Secuencia del RM0008: arrancar (fuerza el LSI), configurar y esperar la sincronizacion.
+    DBGMCU->CR |= DBGMCU_CR_DBG_IWDG_STOP;   // No resetear al frenar en un breakpoint
+    IWDG->KR  = 0xCCCCU;                     // Arranca (no se puede detener por software)
+    IWDG->KR  = 0x5555U;                     // Habilita escritura de PR/RLR
+    IWDG->PR  = Config::IWDG_PRESCALER_DIV32;
+    IWDG->RLR = Config::IWDG_RECARGA;
+    // PVU/RVU: unos pocos ciclos de LSI (~150 us). Acotado por si el LSI no arrancara.
+    for (uint32_t espera = 0U; (IWDG->SR != 0U) && (espera < 100000U); ++espera) {}
+    IWDG->KR  = 0xAAAAU;                     // Recarga con la ventana nueva
 }
 
 
@@ -175,6 +201,9 @@ void Cpp_Main_Loop(void) {
 
         stationController.clearStateChangeFlag();
     }
+
+    // Refresco del watchdog: ultima sentencia de la vuelta (si el loop se cuelga, el IWDG resetea)
+    IWDG->KR = 0xAAAAU;
 }
 
 // ==== CALLBACKS ====

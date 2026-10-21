@@ -237,6 +237,13 @@ class RobotController:
             # Rechazos del firmware (ej. ERR:RESET_TOO_SOON, ERR:INVALID_STATE). Sin este caso
             # quedaban invisibles (nivel debug generico) y un reset rechazado parecia que el
             # boton "no hacia nada".
+            elif clean_msg == "ERR:NOT_AT_HOME":
+                # Rechazo de M110: no pertenece al ciclo automatico (no pasa por _on_firmware_error)
+                self.logger.warning(
+                    "Grabacion denegada: lleve el robot a Home (pulsador izquierdo del joystick) "
+                    "y vuelva a presionar GRABAR."
+                )
+
             elif clean_msg.startswith("ERR:"):
                 self.logger.warning(f"Firmware rechazo el comando: {clean_msg}")
                 self._on_firmware_error()
@@ -342,6 +349,20 @@ class RobotController:
         elif event_msg.startswith("CINTA,"):
             self._set_conveyor_state(event_msg[len("CINTA,"):])
 
+        elif event_msg.startswith("BOOT,"):
+            # El firmware arranco (o se reinicio, p. ej. por el watchdog) con el puerto abierto:
+            # su estado real es Init y cualquier operacion en curso se perdio.
+            causa = event_msg[len("BOOT,"):]
+            if self.current_state == SystemState.INIT:
+                self.logger.info(f"Firmware iniciado (causa: {causa}).")
+            else:
+                self._enter_lockdown_state(
+                    SystemState.FAULT,
+                    f"El firmware se reinicio (causa: {causa}). Presione RESET para resincronizar.",
+                    source="LINK_LOST"
+                )
+                self._set_conveyor_state("DESHABILITADA")
+
         elif event_msg == "AUTO_COMPLETE":
             # El firmware termino de drenar la FIFO tras confirmar M116 (fin de envio) y
             # transiciono solo AUTO_RUNNING -> AUTO_READY. Esta notificacion es asincrona
@@ -409,7 +430,7 @@ class RobotController:
         # porque el firmware puede tardar en drenar la FIFO restante antes de completar.
         # ACK_M120/M121/M122 (cinta) tampoco: el estado de la cinta llega aparte como EVT:CINTA.
         # ACK_M00 llega tras la parada de emergencia, que ya se proceso localmente (EVT:EMERGENCY).
-        ignored_state_acks = ["ACK_M00", "ACK_M3", "ACK_M5", "ACK_M116", "ACK_M120", "ACK_M121", "ACK_M122"]
+        ignored_state_acks = ["ACK_M00", "ACK_M116", "ACK_M120", "ACK_M121", "ACK_M122"]
         if ack_msg in ignored_state_acks:
             return
 
@@ -1119,46 +1140,7 @@ class RobotController:
         return False
 
 
-    # ==== CONTROL DE HERRAMIENTA ====
-    def toggle_actuator(self) -> bool:
-        """
-        Alterna el estado lógico del actuador principal.
-        
-        Retorno:
-            bool: True si el comando fue encolado, False en caso de error o bloqueo de seguridad.
-        """
-        # Condición de Guarda
-        estados_permitidos = [SystemState.IDLE, SystemState.MANUAL, SystemState.AUTO_READY]
-        if self.current_state not in estados_permitidos:
-            self.logger.warning(
-                "Accionamiento de herramienta denegado. "
-                f"El estado '{self.current_state.value}' no permite control manual."
-            )
-            return False
-
-        if not self.is_connected:
-            self.logger.warning("Comando denegado: El sistema está desconectado.")
-            return False
-
-        if self.actuator_active:
-            cmd = "M5"
-            action_desc = "Apagar Actuador (Soltar)"
-        else:
-            cmd = "M3"
-            action_desc = "Encender Actuador (Agarrar)"
-
-        self.logger.info(f"Solicitando {action_desc} (Comando {cmd})...")
-        
-        # Nota: Usamos uart.send_message directamente y no _dispatch_command() 
-        # porque M3/M5 no representan una transición de la Máquina de Estados
-        transmission_success = self.uart.send_message(cmd)
-        
-        if not transmission_success:
-            self.logger.error(f"Fallo de comunicación: Buffer TX lleno al intentar enviar {cmd}.")
-            return False
-
-        return True
-
+    # ==== CONTROL DE CINTA ====
     def toggle_conveyor(self) -> bool:
         """
         Marcha/parada manual de la cinta (M122). Solo fuera del ciclo automatico (IDLE/MANUAL):
@@ -1294,11 +1276,11 @@ class RobotController:
         """
         self.logger.info("Emitiendo comando de parada de emergencia de hardware.")
 
-        # Inyeccion del comando a la cola de transmision
-        transmission_success = self.uart.send_message("M00")
-
-        if not transmission_success:
-            self.logger.error("FALLO CATASTROFICO. Buffer UART colapsado. Imposible emitir M00.")
+        # Escritura directa al puerto, salteando la cola TX (no espera detras de un chunk)
+        if not self.is_connected:
+            self.logger.warning("Sin enlace serial: la parada de emergencia se aplica solo en la PC.")
+        elif not self.uart.send_urgent("M00"):
+            self.logger.error("FALLO CATASTROFICO. Imposible emitir M00 por el puerto serial.")
 
         # Bloqueo incondicional de la maquina de estados local
         self._force_emergency_stop("Activacion de emergencia por software.")

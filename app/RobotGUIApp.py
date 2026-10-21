@@ -124,9 +124,8 @@ class RobotGUIApp:
         panel.request_mode_manual.connect(self.controller.request_manual_mode)
         panel.request_mode_auto.connect(self.controller.request_auto_ready)
         
-        # Jogging y Actuador Final
+        # Jogging y Cinta Transportadora
         panel.request_jog.connect(self.controller.execute_jog)
-        panel.request_toggle_actuator.connect(self.controller.toggle_actuator)
         panel.request_toggle_conveyor.connect(self.controller.toggle_conveyor)
         
         # Memoria y Palletizado
