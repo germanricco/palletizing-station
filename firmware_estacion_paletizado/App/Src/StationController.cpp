@@ -50,6 +50,15 @@ namespace Station {
  *   AutoPaused --M113--> AutoReady
  *   AutoPaused --M99-->  Idle
  *
+ *   AutoRunning --(desvio de la secuencia IR/efector)--> PickRecovery   (EVT:PICK_FAIL,<causa>,<n>)
+ *   PickRecovery --(en Home + caja frente al IR + reintentos disponibles)--> AutoReady
+ *                                                       (EVT:PICK_RETRY,<n> + EVT:SENSOR)
+ *   PickRecovery --(sin caja o sin reintentos)--> PickAlarm             (EVT:PICK_ALARM,<causa>)
+ *   PickRecovery --M99--> Idle
+ *   PickAlarm --M115--> AutoReady   (continuar: re-pick si hay caja; si no, la cinta avanza)
+ *   PickAlarm --M113--> AutoReady   (cancelar: termina el ciclo y desarma la cinta)
+ *   PickAlarm --M99-->  Idle
+ *
  * Prioridad absoluta:
  *   Cualquier estado --M00--> Emergency
  *
@@ -94,7 +103,27 @@ namespace Station {
  *
  *   Desarme automatico al entrar a Init, Idle, Manual, Recording, Fault y Emergency, y a
  *   AutoReady salvo que se venga de AutoRunning (fin normal de trayectoria: queda armada
- *   entre cajas). Cada cambio de estado de la cinta se informa con EVT:CINTA,<ESTADO>.
+ *   entre cajas) o de PickRecovery/PickAlarm (reintento o continuacion del ciclo). Cada cambio
+ *   de estado de la cinta se informa con EVT:CINTA,<ESTADO>.
+ *
+ * SUPERVISION DEL PICK CON EL SENSOR IR (unico sensor de la estacion):
+ *   Activa en AutoRunning cuando la trayectoria arranca con la cinta en EsperandoPick y una caja
+ *   frente al IR. Cruza el estado del IR con los flancos de a1 de los puntos consumidos:
+ *
+ *   Fase          a1   IR esperado   Desvio -> causa
+ *   Aproximacion  0    ocupado       IR libre (>= PICK_PERSISTENCIA_MS)       -> CAJA_RETIRADA (C3)
+ *   Agarre        1    ocupado       a1 1->0 con IR ocupado                   -> OCUPADO_EN_SUELTA (C2)
+ *   Elevacion     1    se libera     IR ocupado tras PICK_T_LIBERACION_MS     -> NO_LIBERO (C1)
+ *   Traslado      1    libre         IR ocupado (>= PICK_PERSISTENCIA_MS)     -> CAJA_CAIDA (C4)
+ *   Liberada      0    libre         -
+ *   Fin de trayectoria sin pick confirmado                                   -> SIN_AGARRE / NO_LIBERO
+ *
+ *   El pick se confirma (EVT:PICK_OK,<ms desde el inicio de la elevacion>) cuando el IR se libera
+ *   con a1=1. Ante un desvio: se vacia la FIFO, se purga el efector y el brazo vuelve a Home con
+ *   rampa (SmoothPosition desde la ultima consigna). Si al llegar la caja sigue frente al IR y
+ *   quedan reintentos (PICK_REINTENTOS_MAX), se re-emite EVT:SENSOR y la PC relanza la misma
+ *   trayectoria; si no, PickAlarm espera al operador. El IR decide: sin caja no hay reintento.
+ *   Limitacion: una caja que cae fuera del haz durante el traslado no es detectable.
  *
  * ESTADO SEGURO POR ESTADO:
  *   Estado              Servos              Efector       Cinta                 Joystick
@@ -104,6 +133,8 @@ namespace Station {
  *   AutoReady           sostienen posicion  sin cambios   armable (M120)        no
  *   AutoRunning         trayectoria         trayectoria   detenida en el pick   no
  *   AutoPaused          sostienen posicion  sin cambios   detenida              no
+ *   PickRecovery        van a Home (rampa)  purga         detenida (armada)     no
+ *   PickAlarm           sostienen Home      apagado       detenida (armada)     no
  *   Fault/Emergency     sostienen posicion  apagado       desarmada             no
  *
  *   Fuera de la FSM: el watchdog (IWDG, ~1 s) resetea el micro si el loop se cuelga, y los
@@ -145,6 +176,15 @@ Controller::Controller(TerminalSerial& terminal,
       _tiempoFinTrayectoria(0U),
       _eventoSensorPendiente(false),
       _ultimoEstadoCintaReportado(EstadoCinta::Deshabilitada),
+      _fasePick(FasePick::Inactiva),
+      _causaFallaPick(CausaFallaPick::Ninguna),
+      _intentosPick(0U),
+      _tickInicioElevacion(0U),
+      _anomaliaPickActiva(false),
+      _tickAnomaliaPick(0U),
+      _consignaAgarre{0.0f, 0.0f, 0.0f},
+      _homeRecuperacionAlcanzado(false),
+      _tickHomeRecuperacion(0U),
 	  _lastTrajectoryTick(0U),
 	  _lastFifoDataTick(0U) {
 }
@@ -164,6 +204,10 @@ void Controller::init(void) {
     _pickCompletado = false;
     _eventoSensorPendiente = false;
     _ultimoEstadoCintaReportado = _cinta.getEstado();
+
+    _fasePick = FasePick::Inactiva;
+    _causaFallaPick = CausaFallaPick::Ninguna;
+    _intentosPick = 0U;
 
     onEnterState(_state);
 }
@@ -274,6 +318,8 @@ const char* Controller::toString(GlobalState state) {
         case GlobalState::AutoReady:   return "AutoReady";
         case GlobalState::AutoRunning: return "AutoRunning";
         case GlobalState::AutoPaused:  return "AutoPaused";
+        case GlobalState::PickRecovery: return "PickRecovery";
+        case GlobalState::PickAlarm:   return "PickAlarm";
         case GlobalState::Fault:       return "Fault";
         case GlobalState::Emergency:   return "Emergency";
         default:                       return "UnknownState";
@@ -292,6 +338,7 @@ const char* Controller::toString(UartCommand command) {
         case UartCommand::M112_StartPlayback:     return "M112";
         case UartCommand::M113_StopPausePlayback: return "M113";
         case UartCommand::M114_ResumePlayback:    return "M114";
+        case UartCommand::M115_ContinuarCiclo:    return "M115";
         case UartCommand::M116_EndOfTrajectory:   return "M116";
         case UartCommand::M120_ArmarCinta:        return "M120";
         case UartCommand::M121_DesarmarCinta:     return "M121";
@@ -334,6 +381,7 @@ UartCommand Controller::parseUartCommand(const char* text) {
     if (std::strcmp(cmd, "M112") == 0)   return UartCommand::M112_StartPlayback;
     if (std::strcmp(cmd, "M113") == 0)   return UartCommand::M113_StopPausePlayback;
     if (std::strcmp(cmd, "M114") == 0)   return UartCommand::M114_ResumePlayback;
+    if (std::strcmp(cmd, "M115") == 0)   return UartCommand::M115_ContinuarCiclo;
     if (std::strcmp(cmd, "M116") == 0)   return UartCommand::M116_EndOfTrajectory;
     if (std::strcmp(cmd, "M120") == 0)   return UartCommand::M120_ArmarCinta;
     if (std::strcmp(cmd, "M121") == 0)   return UartCommand::M121_DesarmarCinta;
@@ -464,6 +512,147 @@ void Controller::gestionarActuadorAuto(uint8_t a1, uint32_t nowMs) {
 }
 
 
+/*
+ * ================================================================
+ * SUPERVISION DEL PICK CON EL SENSOR IR
+ * ================================================================
+ */
+namespace {
+constexpr float RAD_A_GRADOS = 57.29578f;
+}
+
+const char* Controller::toString(CausaFallaPick causa) {
+    switch (causa) {
+        case CausaFallaPick::CajaRetirada:    return "CAJA_RETIRADA";
+        case CausaFallaPick::NoLibero:        return "NO_LIBERO";
+        case CausaFallaPick::OcupadoEnSuelta: return "OCUPADO_EN_SUELTA";
+        case CausaFallaPick::CajaCaida:       return "CAJA_CAIDA";
+        case CausaFallaPick::SinAgarre:       return "SIN_AGARRE";
+        default:                              return "NINGUNA";
+    }
+}
+
+void Controller::iniciarSupervisionPick(void) {
+    // Solo dentro del ciclo: trayectoria disparada por una caja frente al IR con la cinta
+    // detenida esperando el pick. Fuera de eso (p. ej. ensayos sin caja) no hay nada que verificar.
+    const bool enCiclo = (_cinta.getEstado() == EstadoCinta::EsperandoPick) && _cinta.objetoPresente();
+    _fasePick = enCiclo ? FasePick::Aproximacion : FasePick::Inactiva;
+    _anomaliaPickActiva = false;
+}
+
+void Controller::supervisarPickPunto(const PendingAutoCommand& punto, uint32_t nowMs) {
+    const bool efectorEncendido = (punto.a1 != 0U);
+
+    switch (_fasePick) {
+        case FasePick::Aproximacion:
+            if (efectorEncendido) {                         // Flanco 0->1: agarre
+                _consignaAgarre[0] = punto.q1 * RAD_A_GRADOS;
+                _consignaAgarre[1] = punto.q2 * RAD_A_GRADOS;
+                _consignaAgarre[2] = punto.q3 * RAD_A_GRADOS;
+                _fasePick = FasePick::Agarre;
+            }
+            break;
+
+        case FasePick::Agarre:
+        case FasePick::Elevacion:
+            if (!efectorEncendido) {                        // Flanco 1->0 sin pick confirmado
+                if (_cinta.objetoPresente()) {
+                    fallarPick(CausaFallaPick::OcupadoEnSuelta);    // C2
+                } else {
+                    confirmarPick(nowMs);
+                    _fasePick = FasePick::Liberada;
+                }
+            } else if (_fasePick == FasePick::Agarre) {
+                // Primer movimiento posterior al agarre: arranca el plazo de liberacion del IR
+                const float umbral = Config::PICK_UMBRAL_MOVIMIENTO_GRADOS;
+                if ((std::fabs(punto.q1 * RAD_A_GRADOS - _consignaAgarre[0]) > umbral) ||
+                    (std::fabs(punto.q2 * RAD_A_GRADOS - _consignaAgarre[1]) > umbral) ||
+                    (std::fabs(punto.q3 * RAD_A_GRADOS - _consignaAgarre[2]) > umbral)) {
+                    _fasePick = FasePick::Elevacion;
+                    _tickInicioElevacion = nowMs;
+                }
+            }
+            break;
+
+        case FasePick::Traslado:
+            if (!efectorEncendido) {
+                _fasePick = FasePick::Liberada;             // Place: la caja ya salio de la cinta
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+void Controller::supervisarPickSensor(uint32_t nowMs) {
+    const bool ocupado = _cinta.objetoPresente();
+
+    switch (_fasePick) {
+        case FasePick::Agarre:
+        case FasePick::Elevacion:
+            if (!ocupado) {
+                confirmarPick(nowMs);                       // El IR se libero con vacio: pick OK
+            } else if ((_fasePick == FasePick::Elevacion) &&
+                       ((nowMs - _tickInicioElevacion) >= Config::PICK_T_LIBERACION_MS)) {
+                fallarPick(CausaFallaPick::NoLibero);       // C1
+            }
+            return;
+
+        case FasePick::Aproximacion:
+        case FasePick::Traslado: {
+            // Desvios que deben sostenerse PICK_PERSISTENCIA_MS (filtra parpadeos del FC-51)
+            const bool desvio = (_fasePick == FasePick::Aproximacion) ? !ocupado : ocupado;
+            if (!desvio) {
+                _anomaliaPickActiva = false;
+            } else if (!_anomaliaPickActiva) {
+                _anomaliaPickActiva = true;
+                _tickAnomaliaPick = nowMs;
+            } else if ((nowMs - _tickAnomaliaPick) >= Config::PICK_PERSISTENCIA_MS) {
+                fallarPick((_fasePick == FasePick::Aproximacion) ? CausaFallaPick::CajaRetirada   // C3
+                                                                 : CausaFallaPick::CajaCaida);    // C4
+            }
+            return;
+        }
+
+        default:
+            return;
+    }
+}
+
+void Controller::confirmarPick(uint32_t nowMs) {
+    // Tiempo desde el primer movimiento hasta que el IR dejo de ver la caja (calibra T_lib)
+    const uint32_t ms = (_fasePick == FasePick::Elevacion) ? (nowMs - _tickInicioElevacion) : 0U;
+    _fasePick = FasePick::Traslado;
+    _anomaliaPickActiva = false;
+    _intentosPick = 0U;
+
+    char msg[32];
+    std::snprintf(msg, sizeof(msg), "EVT:PICK_OK,%lu\r\n", static_cast<unsigned long>(ms));
+    _terminal.enviarNormal(msg);
+}
+
+void Controller::fallarPick(CausaFallaPick causa) {
+    _causaFallaPick = causa;
+    if (_intentosPick < 255U) _intentosPick++;
+    transitionTo(GlobalState::PickRecovery, HAL_GetTick());
+}
+
+void Controller::continuarCicloTrasPick(void) {
+    // Decision del operador: arranca un conteo nuevo de reintentos para la caja que siga
+    _intentosPick = 0U;
+    transitionTo(GlobalState::AutoReady, HAL_GetTick());
+
+    if (_cinta.getEstado() != EstadoCinta::EsperandoPick) return;   // Cinta desarmada (M121)
+
+    if (_cinta.objetoPresente()) {
+        _eventoSensorPendiente = true;  // Caja reacomodada: la PC relanza el pick
+    } else {
+        _cinta.liberarPick();           // Caja retirada a mano: la cinta avanza a la siguiente
+    }
+}
+
+
 // CONSTRUCCIÓN DE RESPUESTAS ACK / ERR
 CommandResult Controller::makeAck(const char* ackText) {
     CommandResult result{true, true, {0}};
@@ -510,6 +699,8 @@ void Controller::onEnterState(GlobalState state) {
         case GlobalState::AutoReady:   onEnterAutoReady(); break;
         case GlobalState::AutoRunning: onEnterAutoRunning(); break;
         case GlobalState::AutoPaused:  onEnterAutoPaused(); break;
+        case GlobalState::PickRecovery: onEnterPickRecovery(); break;
+        case GlobalState::PickAlarm:   onEnterPickAlarm(); break;
         case GlobalState::Fault:       onEnterFault(); break;
         case GlobalState::Emergency:   onEnterEmergency(); break;
         default: break;
@@ -527,6 +718,8 @@ void Controller::runCurrentState(void) {
         case GlobalState::AutoReady:   onUpdateAutoReady(); break;
         case GlobalState::AutoRunning: onUpdateAutoRunning(); break;
         case GlobalState::AutoPaused:  onUpdateAutoPaused(); break;
+        case GlobalState::PickRecovery: onUpdatePickRecovery(); break;
+        case GlobalState::PickAlarm:   onUpdatePickAlarm(); break;
         case GlobalState::Fault:       onUpdateFault(); break;
         case GlobalState::Emergency:   onUpdateEmergency(); break;
         default: break;
@@ -656,6 +849,7 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
                 return makeAck("ACK_M112");
             }
             if (command == UartCommand::M120_ArmarCinta) {
+                _intentosPick = 0U;     // Ciclo nuevo: la primera caja arranca con reintentos completos
                 // Si ya hay una caja frente al sensor, su flanco ocurrio antes de armar: se
                 // re-emite EVT:SENSOR (despues del ACK) para que la PC no quede esperando.
                 if (_cinta.armar(nowMs) == EventoCinta::ObjetoDetectado) {
@@ -708,6 +902,40 @@ CommandResult Controller::handleUartLine(const char* rawLine, uint32_t nowMs) {
             if (command == UartCommand::M99_GoIdle) {
                 transitionTo(GlobalState::Idle, nowMs);
                 return makeAck("ACK_M99");
+            }
+            return makeErr("ERR:INVALID_STATE");
+
+        case GlobalState::PickRecovery:
+            // Recuperacion automatica en curso (homing con rampa). Solo se acepta salir a Idle.
+            if (command == UartCommand::M99_GoIdle) {
+                transitionTo(GlobalState::Idle, nowMs);
+                return makeAck("ACK_M99");
+            }
+            if (command == UartCommand::M116_EndOfTrajectory) {
+                // EOF que la PC envio antes de enterarse del aborto: ya no hay nada que drenar.
+                return makeAck("ACK_M116");
+            }
+            return makeErr("ERR:PICK_RECOVERY");
+
+        case GlobalState::PickAlarm:
+            if (command == UartCommand::M115_ContinuarCiclo) {
+                continuarCicloTrasPick();
+                return makeAck("ACK_M115");
+            }
+            if (command == UartCommand::M113_StopPausePlayback) {
+                // Cancelar: el ciclo termina (misma semantica que CANCELAR desde AutoPaused)
+                transitionTo(GlobalState::AutoReady, nowMs);
+                _cinta.desarmar();
+                _pickCompletado = false;
+                _intentosPick = 0U;
+                return makeAck("ACK_M113");
+            }
+            if (command == UartCommand::M99_GoIdle) {
+                transitionTo(GlobalState::Idle, nowMs);
+                return makeAck("ACK_M99");
+            }
+            if (command == UartCommand::M116_EndOfTrajectory) {
+                return makeAck("ACK_M116");
             }
             return makeErr("ERR:INVALID_STATE");
 
@@ -919,6 +1147,8 @@ void Controller::onEnterInit(void) {
     clearAutoRuntimeState();
     _cinta.desarmar();
     _pickCompletado = false;
+    _fasePick = FasePick::Inactiva;
+    _intentosPick = 0U;
 }
 
 void Controller::onEnterIdle(void) {
@@ -927,6 +1157,8 @@ void Controller::onEnterIdle(void) {
     clearAutoRuntimeState();
     _cinta.desarmar();
     _pickCompletado = false;
+    _fasePick = FasePick::Inactiva;
+    _intentosPick = 0U;
 
     if (_primerIngresoIdle) {
         realizarServoInitInicial();
@@ -955,10 +1187,16 @@ void Controller::onEnterAutoReady(void) {
     detenerActuadoresManuales();
     clearAutoRuntimeState();
 
+    _fasePick = FasePick::Inactiva;
+
     // Fin normal de trayectoria (AutoRunning -> AutoReady): la cinta sigue armada entre cajas y
-    // se libera via _pickCompletado. Desde cualquier otro origen (M101 desde Idle, cancelacion
-    // M113 desde AutoPaused) el ciclo se considera terminado.
-    if (_previousState != GlobalState::AutoRunning) {
+    // se libera via _pickCompletado. Lo mismo al salir de PickRecovery (reintento) o de
+    // PickAlarm (M115 continua; M113 la desarma explicitamente). Desde cualquier otro origen
+    // (M101 desde Idle, cancelacion M113 desde AutoPaused) el ciclo se considera terminado.
+    const bool cicloSigue = (_previousState == GlobalState::AutoRunning) ||
+                            (_previousState == GlobalState::PickRecovery) ||
+                            (_previousState == GlobalState::PickAlarm);
+    if (!cicloSigue) {
         _cinta.desarmar();
         _pickCompletado = false;
     }
@@ -979,10 +1217,14 @@ void Controller::onEnterAutoRunning(void) {
         _cinta.cancelarLiberacion();
         _lastTrajectoryTick = HAL_GetTick(); // Inicia el reloj principal
         _lastFifoDataTick = HAL_GetTick();   // Arranca limpio el reloj de subalimentacion
+        iniciarSupervisionPick();
         Logger::logDEBUG("AUTO_RUNNING: FIFO inicializada. Listo para solicitar 1er chunk...");
     } else {
     	_lastTrajectoryTick = HAL_GetTick(); // Resincroniza el reloj al despausar
     	_lastFifoDataTick = HAL_GetTick();   // Idem: evita un falso timeout apenas se reanuda
+        // La pausa no consume el plazo de elevacion ni la persistencia de un desvio del IR
+        _tickInicioElevacion = HAL_GetTick();
+        _anomaliaPickActiva = false;
         Logger::logDEBUG("AUTO_RUNNING: reanudando ejecucion. FIFO preservada.");
     }
 }
@@ -990,6 +1232,42 @@ void Controller::onEnterAutoRunning(void) {
 void Controller::onEnterAutoPaused(void) {
     Logger::logDEBUG("FSM -> AutoPaused");
     detenerActuadoresManuales();
+}
+
+void Controller::onEnterPickRecovery(void) {
+    Logger::logERROR("FSM -> PickRecovery (%s, intento %u)", toString(_causaFallaPick),
+                     static_cast<unsigned>(_intentosPick));
+
+    // Abortar la trayectoria: no se consumen mas puntos y los G1 en vuelo se ignoran
+    clearAutoRuntimeState();
+    _fasePick = FasePick::Inactiva;
+
+    // Purgar el vacio (si la ventosa tomo la caja a medias, la suelta sobre la cinta)
+    const ActuatorState efector = _efectorFinal.getState();
+    if ((efector == ActuatorState::Suction) || (efector == ActuatorState::Holding)) {
+        _efectorFinal.commandRelease();
+    }
+
+    // Regreso a Home con rampa trapezoidal desde la ultima consigna de DirectPosition
+    realizarGoHomeNormal();
+    _homeRecuperacionAlcanzado = false;
+
+    // La cinta queda detenida y armada (EsperandoPick): sin liberacion pendiente
+    _cinta.cancelarLiberacion();
+    _pickCompletado = false;
+
+    char msg[48];
+    std::snprintf(msg, sizeof(msg), "EVT:PICK_FAIL,%s,%u\r\n", toString(_causaFallaPick),
+                  static_cast<unsigned>(_intentosPick));
+    _terminal.enviarNormal(msg);
+}
+
+void Controller::onEnterPickAlarm(void) {
+    Logger::logERROR("FSM -> PickAlarm (%s). Esperando al operador (M115 / M113).",
+                     toString(_causaFallaPick));
+    char msg[48];
+    std::snprintf(msg, sizeof(msg), "EVT:PICK_ALARM,%s\r\n", toString(_causaFallaPick));
+    _terminal.enviarNormal(msg);
 }
 
 void Controller::onEnterFault(void) {
@@ -1040,6 +1318,10 @@ void Controller::onUpdateAutoReady(void) {}
 void Controller::onUpdateAutoRunning(void) {
     uint32_t nowMs = HAL_GetTick();
 
+    // Supervision continua del IR (caja retirada, plazo de elevacion, caja caida)
+    supervisarPickSensor(nowMs);
+    if (_state != GlobalState::AutoRunning) return;
+
     // Metrónomo estricto a 50Hz (20ms)
     if ((nowMs - _lastTrajectoryTick) >= 20U) {
 
@@ -1051,6 +1333,10 @@ void Controller::onUpdateAutoRunning(void) {
         if (dequeueAutoPoint(currentPoint)) {
             // Datos reales fluyendo: refrescamos el reloj de subalimentacion.
             _lastFifoDataTick = nowMs;
+
+            // Supervision del punto ANTES de aplicarlo: si aborta, el punto no se ejecuta
+            supervisarPickPunto(currentPoint, nowMs);
+            if (_state != GlobalState::AutoRunning) return;
 
             // A. Cinemática
             float anguloGradosQ1 = currentPoint.q1 * 57.29578f;
@@ -1064,6 +1350,16 @@ void Controller::onUpdateAutoRunning(void) {
             // B. Actuador (Corregido con timestamp)
             gestionarActuadorAuto(currentPoint.a1, nowMs);
         } else if (_endOfTrajectoryPending) {
+            // Fin de trayectoria sin pick confirmado: la caja sigue frente al IR
+            if (_fasePick == FasePick::Aproximacion) {
+                fallarPick(CausaFallaPick::SinAgarre);
+                return;
+            }
+            if ((_fasePick == FasePick::Agarre) || (_fasePick == FasePick::Elevacion)) {
+                fallarPick(CausaFallaPick::NoLibero);
+                return;
+            }
+
             // FIFO vacia y confirmado que no llegaran mas puntos (M116): trayectoria completa.
             Logger::logDEBUG("AUTO_RUNNING: FIFO vacia con EOF confirmado. Trayectoria completa.");
             _pickCompletado = true;     // La cinta se libera tras CINTA_RETARDO_LIBERACION_MS
@@ -1089,6 +1385,37 @@ void Controller::onUpdateAutoRunning(void) {
 }
 
 void Controller::onUpdateAutoPaused(void) {}
+
+void Controller::onUpdatePickRecovery(void) {
+    const uint32_t nowMs = HAL_GetTick();
+
+    // 1. Esperar el regreso a Home (SmoothPosition informa la llegada) y el asentamiento
+    if (!_homeRecuperacionAlcanzado) {
+        if (_servoBase.isTargetReached() && _servoHombro.isTargetReached() && _servoCodo.isTargetReached()) {
+            _homeRecuperacionAlcanzado = true;
+            _tickHomeRecuperacion = nowMs;
+        }
+        return;
+    }
+    if ((nowMs - _tickHomeRecuperacion) < Config::PICK_ASENTAMIENTO_MS) return;
+
+    // 2. Decide el IR: con la caja todavia en posicion y reintentos disponibles, se relanza el
+    //    mismo pick (la PC recibe EVT:SENSOR y vuelve a enviar la trayectoria del paso actual).
+    const bool cajaPresente = _cinta.objetoPresente();
+    const bool cicloArmado = (_cinta.getEstado() == EstadoCinta::EsperandoPick);
+
+    if (cajaPresente && cicloArmado && (_intentosPick <= Config::PICK_REINTENTOS_MAX)) {
+        char msg[32];
+        std::snprintf(msg, sizeof(msg), "EVT:PICK_RETRY,%u\r\n", static_cast<unsigned>(_intentosPick));
+        _terminal.enviarNormal(msg);
+        transitionTo(GlobalState::AutoReady, nowMs);
+        _eventoSensorPendiente = true;      // Se emite en la proxima vuelta, despues de PICK_RETRY
+    } else {
+        transitionTo(GlobalState::PickAlarm, nowMs);
+    }
+}
+
+void Controller::onUpdatePickAlarm(void) {}
 
 void Controller::onUpdateFault(void) {}
 

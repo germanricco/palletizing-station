@@ -35,6 +35,8 @@ enum class GlobalState {
     AutoReady,		/**< Preparado para recibir y ejecutar trayectoria G-Code. */
     AutoRunning,	/**< Ejecución activa de trayectoria en tiempo real (Streaming). */
     AutoPaused,		/**< Pausa de trayectoria. Mantiene posición sin vaciar la FIFO. */
+    PickRecovery,	/**< Pick fallido: trayectoria abortada, efector purgado, regreso a Home. Decide reintento o alarma. */
+    PickAlarm,		/**< Pick fallido sin reintentos disponibles: espera la decision del operador (M115/M113). */
     Fault,			/**< Falla recuperable del sistema. */
     Emergency		/**< Parada de emergencia (E-Stop). Requiere reinicio físico. */
 };
@@ -57,6 +59,7 @@ enum class UartCommand {
     M112_StartPlayback,		/**< Inicia el consumo de la FIFO de trayectoria. */
     M113_StopPausePlayback,	/**< Pausa la ejecución (desde AutoRunning) o cancela (desde AutoPaused). */
     M114_ResumePlayback,	/**< Reanuda la trayectoria pausada. */
+    M115_ContinuarCiclo,	/**< Desde PickAlarm: retoma el ciclo (re-pick si hay caja, si no libera la cinta). */
     M116_EndOfTrajectory,	/**< Marca que no llegarán más puntos: drenar FIFO y pasar a AutoReady al vaciarse. */
     M120_ArmarCinta,		/**< Habilita el ciclo automatico de la cinta (solo AutoReady). */
     M121_DesarmarCinta,		/**< Detiene y deshabilita la cinta. Valido en cualquier estado. */
@@ -88,6 +91,36 @@ struct PendingAutoCommand {
     float q2;				/**< Consigna articular 2 (Hombro). */
     float q3;				/**< Consigna articular 3 (Codo). */
     uint8_t a1;				/**< Estado del actuador. */
+};
+
+
+/**
+ * @enum FasePick
+ * @brief Fase del pick segun la secuencia esperada del sensor IR y del efector (a1).
+ * @details Secuencia normal: Aproximacion (a1=0, IR ocupado) -> Agarre (a1 0->1, brazo quieto)
+ *          -> Elevacion (primer movimiento; el IR debe liberarse antes de PICK_T_LIBERACION_MS)
+ *          -> Traslado (IR libre con a1=1: pick confirmado) -> Liberada (a1 1->0 en el place).
+ */
+enum class FasePick : uint8_t {
+    Inactiva,		/**< Sin supervision (trayectoria fuera del ciclo o sin caja frente al IR). */
+    Aproximacion,
+    Agarre,
+    Elevacion,
+    Traslado,
+    Liberada
+};
+
+/**
+ * @enum CausaFallaPick
+ * @brief Desvio de la secuencia esperada que aborta el pick.
+ */
+enum class CausaFallaPick : uint8_t {
+    Ninguna,
+    CajaRetirada,		/**< C3: el IR se libero con a1=0 (caja retirada o empujada antes del agarre). */
+    NoLibero,			/**< C1: el IR siguio ocupado PICK_T_LIBERACION_MS despues de empezar a subir. */
+    OcupadoEnSuelta,	/**< C2: el IR seguia ocupado al apagar el efector (la caja nunca salio). */
+    CajaCaida,			/**< C4: el IR volvio a ocuparse con a1=1 despues de liberarse (la caja cayo). */
+    SinAgarre			/**< Fin de trayectoria sin pick confirmado (sin flanco de a1 o sin liberar el IR). */
 };
 
 
@@ -187,6 +220,17 @@ private:
     bool _eventoSensorPendiente;			/**< EVT:SENSOR a emitir en este ciclo (siempre despues del ACK del comando procesado). */
     EstadoCinta _ultimoEstadoCintaReportado;	/**< Ultimo estado informado por EVT:CINTA (deteccion de cambios). */
 
+    // --- Supervision del pick con el sensor IR ---
+    FasePick _fasePick;					/**< Fase de la secuencia IR/efector del pick en curso. */
+    CausaFallaPick _causaFallaPick;		/**< Ultima causa de falla (para EVT:PICK_FAIL / EVT:PICK_ALARM). */
+    uint8_t _intentosPick;				/**< Fallas consecutivas de la caja actual (0 tras un pick confirmado). */
+    uint32_t _tickInicioElevacion;		/**< Primer movimiento despues del agarre (base del plazo C1). */
+    bool _anomaliaPickActiva;			/**< Desvio del IR en curso (C3/C4), pendiente de persistencia. */
+    uint32_t _tickAnomaliaPick;			/**< Inicio del desvio del IR en curso. */
+    float _consignaAgarre[3];			/**< Consigna articular en el agarre [grados de firmware]. */
+    bool _homeRecuperacionAlcanzado;	/**< PickRecovery: los 3 servos llegaron a Home. */
+    uint32_t _tickHomeRecuperacion;		/**< PickRecovery: instante de llegada a Home (asentamiento). */
+
     // Control de Metrónomo Estricto 50Hz
     uint32_t _lastTrajectoryTick;
     uint32_t _lastFifoDataTick;			/**< Ultimo tick en que se desencolo un punto real (ver AUTO_FIFO_STARVATION_TIMEOUT_MS). */
@@ -236,6 +280,15 @@ private:
     void reportarEstadoCinta(void);
     void enviarEstadoCintaPorUart(void);
 
+    // Supervision del pick (sensor IR + flancos de a1)
+    void iniciarSupervisionPick(void);
+    void supervisarPickPunto(const PendingAutoCommand& punto, uint32_t nowMs);
+    void supervisarPickSensor(uint32_t nowMs);
+    void confirmarPick(uint32_t nowMs);
+    void fallarPick(CausaFallaPick causa);
+    void continuarCicloTrasPick(void);
+    static const char* toString(CausaFallaPick causa);
+
     // Callbacks On-Enter
     void onEnterBoot(void);
     void onEnterInit(void);
@@ -245,6 +298,8 @@ private:
     void onEnterAutoReady(void);
     void onEnterAutoRunning(void);
     void onEnterAutoPaused(void);
+    void onEnterPickRecovery(void);
+    void onEnterPickAlarm(void);
     void onEnterFault(void);
     void onEnterEmergency(void);
 
@@ -256,6 +311,8 @@ private:
     void onUpdateAutoReady(void);
     void onUpdateAutoRunning(void);
     void onUpdateAutoPaused(void);
+    void onUpdatePickRecovery(void);
+    void onUpdatePickAlarm(void);
     void onUpdateFault(void);
     void onUpdateEmergency(void);
 

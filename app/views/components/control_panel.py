@@ -596,7 +596,8 @@ class ControlPanel(QWidget):
         elif state_name in ["MANUAL", "RECORDING"]:
             self.btn_manual.setStyleSheet(f"background-color: {AppConfig.COLORS.SEMANTIC_MANUAL}; {active_style}")
             
-        elif state_name in ["AUTO_READY", "AUTO_RUNNING", "AUTO_PAUSED", "AUTO_WAITING_SENSOR"]:
+        elif state_name in ["AUTO_READY", "AUTO_RUNNING", "AUTO_PAUSED", "AUTO_WAITING_SENSOR",
+                            "AUTO_PICK_RECOVERY", "AUTO_PICK_ALARM"]:
             self.btn_auto.setStyleSheet(f"background-color: #34C759; {active_style}")
 
         # Logica de UI para Grabacion
@@ -647,6 +648,16 @@ class ControlPanel(QWidget):
             self.stack_execute.setCurrentIndex(2)   # REANUDAR
             self._set_button_enabled(self.btn_cancel, True)
             self._set_button_enabled(self.btn_resume, True)
+
+        elif state_name in ("AUTO_PICK_RECOVERY", "AUTO_PICK_ALARM"):
+            # Pick fallido. Mientras el firmware vuelve a Home y decide el reintento, CANCELAR y
+            # REANUDAR se ven pero quedan bloqueados; en alarma esperan la decision del operador
+            # (REANUDAR -> M115 continua el ciclo, CANCELAR -> M113 lo termina).
+            waiting_operator = (state_name == "AUTO_PICK_ALARM")
+            self.stack_abort.setCurrentIndex(2)     # CANCELAR
+            self.stack_execute.setCurrentIndex(2)   # REANUDAR
+            self._set_button_enabled(self.btn_cancel, waiting_operator)
+            self._set_button_enabled(self.btn_resume, waiting_operator)
 
         else:
             # Cualquier otro estado (IDLE, MANUAL, RECORDING, FAULT...). Todo bloqueado.

@@ -154,7 +154,8 @@ class MainWindow(QMainWindow):
         is_simulating = (state_name == "AUTO_READY" and progress > 0)
 
         # 1. GESTION DE TERMINAL Y SEGURIDAD MANUAL
-        is_safe_for_manual = state_name in ["IDLE", "MANUAL", "AUTO_READY", "RECORDING"] and not is_simulating
+        # (AUTO_PICK_ALARM tambien: el operador puede pedir STATUS o responder M115/M113 a mano)
+        is_safe_for_manual = state_name in ["IDLE", "MANUAL", "AUTO_READY", "RECORDING", "AUTO_PICK_ALARM"] and not is_simulating
         self.terminal_widget.set_enabled_state(is_safe_for_manual)
         
         # 2. GESTION DE BARRA DE PROGRESO

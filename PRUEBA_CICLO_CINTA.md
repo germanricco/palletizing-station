@@ -52,7 +52,7 @@ Marcar cada paso. Si uno falla, anotar el número y copiar el panel de logs de l
 | 7 | Poner una caja en la cinta | Al llegar al sensor: la cinta frena, la tarjeta muestra `ESPERANDO PICK` en ámbar y **el robot arranca solo**. |
 | 8 | Observar el pick | Cuando el robot levanta la caja, la cinta **sigue frenada**. Rearranca recién cuando el robot vuelve a Home (~0,5 s después de terminar). La etiqueta muestra `CAJAS: 1`. |
 | 9 | Repetir con 2 cajas más, sin tocar nada | Cada caja dispara el ciclo. La etiqueta llega a `CAJAS: 3`. |
-| 10 | **Pick fallido:** quitar la caja de la ventosa durante el pick, o dejar la caja frente al sensor | Al terminar la trayectoria, la cinta **no arranca** mientras haya una caja frente al sensor. Al retirarla a mano, arranca. |
+| 10 | **Pick fallido:** quitar la caja de la ventosa durante el pick, o dejar la caja frente al sensor | *(Cambió con `feature/supervision-pick`: ver `PRUEBA_SUPERVISION_PICK.md`.)* El firmware aborta la trayectoria, el brazo vuelve a Home y se reintenta una vez; si vuelve a fallar, alarma que espera al operador. |
 | 11 | **DETENER CICLO**. Con el ciclo detenido, poner una caja frente al sensor y tocar **INICIAR CICLO** | La cinta no arranca y el robot hace el pick de inmediato (la caja ya estaba esperando). |
 | 12 | Con la cinta avanzando, **E-STOP** | La cinta frena al instante y la tarjeta muestra `DETENIDA`. Esperar más de 1 s, **RESET**, IDLE. *(En el firmware anterior de `prueba/cinta` la cinta NO frenaba: corría en modo bring-up, fuera de la máquina de estados. Con este firmware tiene que frenar.)* |
 | 13 | AUTO → INICIAR CICLO → **DETENER CICLO** | La cinta frena y vuelve a `DETENIDA`. Queda listo para iniciar de nuevo. |
@@ -90,4 +90,4 @@ Escribir el comando en la terminal (abajo a la izquierda) y mirar la respuesta e
 - **Desconectar o E-STOP con una caja tomada:** el efector se apaga y la caja cae donde esté el brazo. Es intencional: los estados seguros cortan la energía.
 - **DETENER CICLO con el robot arrancando:** si la caja ya disparó la trayectoria, ese pick se completa y recién después el ciclo termina. Durante ese lapso el botón sigue visible; el log muestra "se completa la caja en curso".
 - **Reiniciar con receta:** INICIAR CICLO siempre arranca la receta desde la caja 1. Si se detiene a mitad de un pallet, el siguiente arranque vuelve a la primera posición.
-- **Pick fallido:** si la caja queda frente al sensor, la cinta no arranca y el ciclo queda esperando. Retirar la caja a mano: la cinta arranca y el ciclo sigue. El contador ya cuenta esa caja.
+- **Pick fallido:** *(resuelto en `feature/supervision-pick`)* el firmware lo detecta con el sensor IR, aborta, reintenta una vez y después da alarma. La caja que falla no se cuenta. Ver `PRUEBA_SUPERVISION_PICK.md`.
