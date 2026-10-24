@@ -36,3 +36,6 @@ venv/
 
 # Documentacion de trabajo local
 docs/
+
+# Salidas de ensayos de banco (logs y graficos)
+ensayos/
