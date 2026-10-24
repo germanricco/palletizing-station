@@ -27,9 +27,9 @@ class SignalBridge(QObject):
     Puente de señales para garantizar la seguridad entre hilos.
     """
     telemetry_received = Signal(object, list, object, bool, int)    # telemetria
-    trajectory_loaded = Signal(str)      # trayectoria cargada, emite el nombre del archivo
     prompt_save_requested = Signal(str)  # solicitar nombre de guardado
-    trajectory_loaded = Signal(dict)
+    trajectory_loaded = Signal(dict)     # trayectoria/receta cargada (payload con tipo y progreso)
+    conveyor_state_changed = Signal(str) # estado de la cinta transportadora (EVT:CINTA)
 
 
 class RobotGUIApp:
@@ -105,6 +105,10 @@ class RobotGUIApp:
         self.controller.prompt_save_callback = self._on_prompt_save_requested
         self.bridge.prompt_save_requested.connect(self._show_save_dialog)
 
+        # Estado de la Cinta Transportadora
+        self.controller.conveyor_update_callback = self._on_conveyor_update
+        self.bridge.conveyor_state_changed.connect(self.window.control_panel_widget.update_conveyor_state)
+
         # --- Eventos de Usuario (UI -> Backend)
         # A. Terminal UART
         self.window.terminal_widget.command_submitted.connect(self.controller.send_manual_command)
@@ -120,9 +124,9 @@ class RobotGUIApp:
         panel.request_mode_manual.connect(self.controller.request_manual_mode)
         panel.request_mode_auto.connect(self.controller.request_auto_ready)
         
-        # Jogging y Actuador Final
+        # Jogging y Cinta Transportadora
         panel.request_jog.connect(self.controller.execute_jog)
-        panel.request_toggle_actuator.connect(self.controller.toggle_actuator)
+        panel.request_toggle_conveyor.connect(self.controller.toggle_conveyor)
         
         # Memoria y Palletizado
         panel.request_start_recording.connect(self.controller.start_recording)
@@ -134,8 +138,7 @@ class RobotGUIApp:
         panel.request_stop_palletizing.connect(self.controller.stop_palletizing)
         panel.request_unload_memory.connect(self.controller.unload_recipe)
         
-        # Ejecucion de Trayectoria
-        panel.request_execute_auto.connect(self.controller.execute_auto)
+        # Ejecucion de Trayectoria (la ejecucion real la dispara el sensor dentro del ciclo)
         panel.request_simulate_trajectory.connect(self.controller.simulate_trajectory)
         panel.request_stop_simulation.connect(self.controller.stop_simulation)
         panel.request_pause_trajectory.connect(self.controller.stop_trajectory)
@@ -201,6 +204,10 @@ class RobotGUIApp:
         Puente seguro: Recibe del backend y emite la señal hacia el hilo principal de la GUI.
         """
         self.bridge.trajectory_loaded.emit(payload)
+
+    def _on_conveyor_update(self, state: str) -> None:
+        """Puente seguro: estado de la cinta desde el hilo RX hacia el hilo de la GUI."""
+        self.bridge.conveyor_state_changed.emit(state)
 
     def _on_prompt_save_requested(self, default_name: str) -> None:
         """Puente para saltar al hilo principal de Qt."""

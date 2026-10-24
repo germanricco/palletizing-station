@@ -62,9 +62,17 @@ def main():
     # QtLogHandler.emit() no hace I/O bloqueante (solo emite una señal Qt: encolada si se llama
     # desde otro hilo, directa pero barata si se llama desde el propio hilo de la GUI), asi que
     # no necesita pasar por la cola de arriba.
+    # El visor de la GUI (appendHtml en el hilo de la GUI) muestra INFO o superior; el detalle
+    # DEBUG queda en el archivo de log (SystemLogger).
     qt_logger = QtLogHandler()
+    qt_logger.setLevel(logging.INFO)
     qt_logger.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(qt_logger)
+
+    # Librerias de terceros: con el root en DEBUG, matplotlib emite cientos de lineas
+    # (font_manager) al arrancar. Solo interesan sus advertencias.
+    for noisy in ("matplotlib", "PIL"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     logging.info("Inicializando Robot Control GUI...")
 
@@ -82,7 +90,7 @@ def main():
     # El qt_logger emite de forma segura al LogViewer
     qt_logger.log_emitted.connect(gui_app.window.logs_widget.append_log)
 
-    # 6. Cierre seguroC
+    # 6. Cierre seguro
     app.aboutToQuit.connect(lambda: graceful_shutdown(robot_controller))
 
     # 8. Desplegar la ventana y entregar el control al Event Loop

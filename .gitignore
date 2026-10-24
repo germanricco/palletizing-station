@@ -33,3 +33,6 @@ trajectories/
 # Archivos de documentacion
 documents/venv/
 venv/
+
+# Documentacion de trabajo local
+docs/

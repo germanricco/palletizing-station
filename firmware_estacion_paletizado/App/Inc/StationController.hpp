@@ -14,6 +14,7 @@
 #include "Joystick.hpp"
 #include "Servo.hpp"
 #include "Actuador.hpp"
+#include "Cinta.hpp"
 #include "TerminalSerial.hpp"
 #include <cstdint>
 
@@ -57,6 +58,9 @@ enum class UartCommand {
     M113_StopPausePlayback,	/**< Pausa la ejecución (desde AutoRunning) o cancela (desde AutoPaused). */
     M114_ResumePlayback,	/**< Reanuda la trayectoria pausada. */
     M116_EndOfTrajectory,	/**< Marca que no llegarán más puntos: drenar FIFO y pasar a AutoReady al vaciarse. */
+    M120_ArmarCinta,		/**< Habilita el ciclo automatico de la cinta (solo AutoReady). */
+    M121_DesarmarCinta,		/**< Detiene y deshabilita la cinta. Valido en cualquier estado. */
+    M122_CintaManual,		/**< Marcha manual de la cinta (M122 [S<v>]). Solo Idle/Manual. */
     M999_ResetError,		/**< Salida controlada de Fault/Emergency. Solo valido desde esos dos estados. */
     M00_EStop,				/**< Parada de emergencia. Corta potencia inmediatamente. */
 
@@ -99,11 +103,12 @@ public:
 	 * @param joystickIzquierdo Periférico de entrada analógica.
 	 * @param servoBase Actuador principal del primer grado de libertad.
 	 * @param efectorFinal Controlador del circuito neumático (Bomba y Válvula).
+	 * @param cinta Sub-maquina de la cinta transportadora (Motor DC + Sensor IR de fin de cinta).
 	 */
     Controller(TerminalSerial& terminal,
                Joystick& joystickIzquierdo, Joystick& joystickDerecho,
                Servo& servoBase, Servo& servoHombro, Servo& servoCodo,
-			   Actuador& efectorFinal);
+			   Actuador& efectorFinal, Cinta& cinta);
 
     /**
      * @brief Inicializa el estado del controlador y prepara la FSM.
@@ -143,6 +148,8 @@ private:
 
     Actuador& _efectorFinal;
 
+    Cinta& _cinta;
+
     // --- Variables de Estado Interno del Controlador ---
     GlobalState _state;
     GlobalState _previousState;
@@ -173,6 +180,12 @@ private:
     bool _endOfTrajectoryPending;			/**< true tras M116: drenar FIFO restante y pasar a AutoReady al vaciarse. */
 
     bool _homingActive;					/**< true mientras dura el regreso a Home disparado por el pulsador izquierdo (Manual/Recording). */
+
+    // --- Cinta transportadora (sub-maquina ortogonal) ---
+    bool _pickCompletado;					/**< EOF de trayectoria: liberar la cinta tras CINTA_RETARDO_LIBERACION_MS en AutoReady. */
+    uint32_t _tiempoFinTrayectoria;			/**< Tick del EOF (base del retardo de liberacion de la cinta). */
+    bool _eventoSensorPendiente;			/**< EVT:SENSOR a emitir en este ciclo (siempre despues del ACK del comando procesado). */
+    EstadoCinta _ultimoEstadoCintaReportado;	/**< Ultimo estado informado por EVT:CINTA (deteccion de cambios). */
 
     // Control de Metrónomo Estricto 50Hz
     uint32_t _lastTrajectoryTick;
@@ -213,9 +226,15 @@ private:
     void detenerActuadoresManuales(void);
     void realizarServoInitInicial(void);
     void realizarGoHomeNormal(void);
+    bool robotEnHome(void) const;
     void enviarTelemetria(void);
     void enviarEstadoActualPorUart(void);
     void procesarTeleoperacion(void);
+
+    // Cinta transportadora
+    CommandResult procesarComandoCintaManual(const char* rawCommand, uint32_t nowMs);
+    void reportarEstadoCinta(void);
+    void enviarEstadoCintaPorUart(void);
 
     // Callbacks On-Enter
     void onEnterBoot(void);

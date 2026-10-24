@@ -8,6 +8,7 @@
 #include "Logger.hpp"
 #include "StationController.hpp"
 #include "SensorIR.hpp"
+#include "Cinta.hpp"
 
 #include "stm32f1xx_hal.h"
 #include <cstdio>
@@ -68,10 +69,15 @@ Servo servo_codo(&TIM3->CCR3,
 
 
 // MotorDC
-MotorDC motor_cinta(&TIM2->CCR3, 49, 0);
+MotorDC motor_cinta(&TIM2->CCR3, 49, Config::CINTA_MIN_CCR);
 
 //SensorIR//IMPORTANTE: suponemos que el IR da un nivel LOW cuando detecta por eso RESET
-SensorIR sensor_fin_cinta(GPIOB,GPIO_PIN_12,GPIO_PIN_RESET,30);
+SensorIR sensor_fin_cinta(GPIOB, GPIO_PIN_12, GPIO_PIN_RESET, Config::SENSOR_IR_DEBOUNCE_MS);
+
+// Cinta transportadora (sub-maquina: motor + sensor de fin de cinta)
+Cinta cinta_transportadora(motor_cinta, sensor_fin_cinta,
+                           Config::CINTA_VELOCIDAD_NOMINAL,
+                           Config::CINTA_RAMPA_ARRANQUE_MS);
 
 // Actuador
 Actuador efector_final(&TIM2->CCR1, &TIM2->CCR2, 49, 800);
@@ -83,7 +89,7 @@ TerminalSerial terminal(&huart1);
 Station::Controller stationController(terminal,
 									joystick_izquierdo, joystick_derecho,
 									servo_base, servo_hombro, servo_codo,
-									efector_final);
+									efector_final, cinta_transportadora);
 
 
 // ==== INICIALIZACION DEL SISTEMA ====
@@ -121,12 +127,41 @@ void Cpp_Main_Init(void) {
     // Sensor IR de fin de cinta
     sensor_fin_cinta.init(HAL_GetTick());
 
+    // Cinta transportadora (arranca deshabilitada; la arma la FSM con M120)
+    cinta_transportadora.init(HAL_GetTick());
+
     // Controlador
     stationController.init();
 
     // Mensaje Inicial
     terminal.enviarNormal(
-        "PROTO: M98 M99 M100 M101 M110 M111 M112 M113 M114 M116 M999 M00 STATUS\r\n");
+        "PROTO: M98 M99 M100 M101 M110 M111 M112 M113 M114 M116 M120 M121 M122 M999 M00 STATUS\r\n");
+
+    // Causa del arranque (RCC_CSR). Si la PC estaba conectada, EVT:BOOT le avisa que el
+    // firmware se reinicio (p. ej. por el watchdog) y que su estado ya no es valido.
+    // El IWDG tambien activa PINRSTF, por eso se evalua primero.
+    const uint32_t causaReset = RCC->CSR;
+    const char* causa = "OTRO";
+    if ((causaReset & RCC_CSR_IWDGRSTF) != 0U)      causa = "WATCHDOG";
+    else if ((causaReset & RCC_CSR_SFTRSTF) != 0U)  causa = "SOFTWARE";
+    else if ((causaReset & RCC_CSR_PORRSTF) != 0U)  causa = "ENCENDIDO";
+    else if ((causaReset & RCC_CSR_PINRSTF) != 0U)  causa = "PIN_RESET";
+    RCC->CSR |= RCC_CSR_RMVF;                // Limpia las banderas para el proximo arranque
+
+    char msgBoot[32];
+    std::snprintf(msgBoot, sizeof(msgBoot), "EVT:BOOT,%s\r\n", causa);
+    terminal.enviarNormal(msgBoot);
+
+    // Watchdog: se arranca al final para que la inicializacion no cuente en su ventana.
+    // Secuencia del RM0008: arrancar (fuerza el LSI), configurar y esperar la sincronizacion.
+    DBGMCU->CR |= DBGMCU_CR_DBG_IWDG_STOP;   // No resetear al frenar en un breakpoint
+    IWDG->KR  = 0xCCCCU;                     // Arranca (no se puede detener por software)
+    IWDG->KR  = 0x5555U;                     // Habilita escritura de PR/RLR
+    IWDG->PR  = Config::IWDG_PRESCALER_DIV32;
+    IWDG->RLR = Config::IWDG_RECARGA;
+    // PVU/RVU: unos pocos ciclos de LSI (~150 us). Acotado por si el LSI no arrancara.
+    for (uint32_t espera = 0U; (IWDG->SR != 0U) && (espera < 100000U); ++espera) {}
+    IWDG->KR  = 0xAAAAU;                     // Recarga con la ventana nueva
 }
 
 
@@ -153,51 +188,8 @@ void Cpp_Main_Loop(void) {
 
     terminal.update();
 
-    bool cambio_sensor_fin_cinta = sensor_fin_cinta.update(tiempo_actual);
-
-    // Flanco de deteccion: notificamos al orquestador de la PC via protocolo estructurado
-    // (antes solo se logueaba localmente, invisible para la maquina de estados de la PC).
-    if (cambio_sensor_fin_cinta && sensor_fin_cinta.objetoDetectado())
-    {
-        terminal.enviarNormal("EVT:SENSOR\r\n");
-    }
-
-    // ===================================================================================
-    /**
-     * RUTINA DE PRUEBA: PERFIL DE VELOCIDAD MOTOR CINTA
-     */
-    // Ciclo de prueba de 12000 ms (12 segundos)
-    /*uint32_t tiempo_ciclo = tiempo_actual % 12000;
-    float velocidad_prueba = 0.0f;
-
-    if (tiempo_ciclo < 1000) {
-    	// Fase 1: Aceleración Lineal (0 a 1 seg)
-        // Mapea el tiempo de (0 a 1000 ms) al rango de velocidad (0.0f a 0.5f)
-        velocidad_prueba = (static_cast<float>(tiempo_ciclo) / 1000.0f) * 0.25f;
-    }
-    else if (tiempo_ciclo < 11000) {
-        // Fase 2: Mantenimiento de Velocidad (1 a 11 seg)
-        // Mantiene la velocidad constante durante 10 segundos
-        velocidad_prueba = 0.25f;
-    }
-    else {
-        // Fase 3: Desaceleración Lineal (11 a 12 seg)
-        // Mapea el tiempo de (11000 a 12000 ms) para reducir la velocidad de 0.5f a 0.0f
-        velocidad_prueba = 0.25f - ((static_cast<float>(tiempo_ciclo - 11000) / 1000.0f) * 0.25f);
-    }
-
-    // Inyección de la velocidad calculada al motor
-    //motor_cinta.setSpeed(velocidad_prueba);
-    float velocidad_motor_cinta = velocidad_prueba;
-
-    if (sensor_fin_cinta.objetoDetectado())
-    {
-        velocidad_motor_cinta = 0.0f;
-    }
-
-    motor_cinta.setSpeed(velocidad_motor_cinta);*/
-    // ===================================================================================
-
+    // La cinta (sensor de fin de cinta incluido) se actualiza dentro del controlador:
+    // Cinta::update es el unico consumidor de SensorIR::update y emite EVT:SENSOR/EVT:CINTA.
     stationController.update(tiempo_actual);
 
     // Log para detectar cambios de estado (opcional)
@@ -209,6 +201,9 @@ void Cpp_Main_Loop(void) {
 
         stationController.clearStateChangeFlag();
     }
+
+    // Refresco del watchdog: ultima sentencia de la vuelta (si el loop se cuelga, el IWDG resetea)
+    IWDG->KR = 0xAAAAU;
 }
 
 // ==== CALLBACKS ====

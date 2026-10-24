@@ -9,7 +9,7 @@ from utils.system_logger import SystemLogger
 from utils.trajectory_repository import TrajectoryRepository
 from control.robot_EEZYbotMK2 import RoboticArmMK2
 from communication.async_uart import AsyncUARTCommunicator
-from control.trajectory_streamer import TrajectoryStreamer
+from control.trajectory_streamer import TrajectoryStreamer, StreamState
 
 class SystemState(Enum):
     BOOT = "BOOT"
@@ -72,10 +72,30 @@ class RobotController:
         # telemetria pura (ver _handle_telemetry) para no pisarlo con 0 en cada uno de ellos.
         self._current_progress: int = 0
 
+        # Ultimos angulos de telemetria procesados por la cinematica. Con el robot quieto la
+        # telemetria repite los mismos valores a 50 Hz: no hace falta recalcular la cinematica
+        # directa (~0.7 ms con el GIL tomado) en cada trama.
+        self._last_telemetry_joints: Optional[tuple] = None
+
         # Gestor de Recetas (Palletizado)
         self.active_recipe: List[str] = []      # Lista de archivos de trayectorias en orden
         self.current_recipe_step: int = 0       # Indice de la caja actual (0 = Caja A)
         self.pallets_completed: int = 0         # Contador global de ciclos completados
+
+        # Ciclo automatico disparado por el sensor de fin de cinta. Funciona igual con una receta
+        # o con una trayectoria unica (receta de 1 paso que se repite en cada caja).
+        self._cycle_active: bool = False        # True entre INICIAR CICLO y su fin (stop/cancel/fault)
+        # Serializa el ciclo entre el hilo RX (EVT:SENSOR/AUTO_COMPLETE/ERR) y el hilo de la GUI
+        # (INICIAR/DETENER). Reentrante: los handlers del RX llaman a stop_palletizing().
+        self._cycle_lock = threading.RLock()
+        # Comando del ciclo enviado y aun sin ACK ("M120"/"M112"). Permite atribuir un ERR:* del
+        # firmware al ciclo (y no a, por ej., un M113 tardio) antes de abortarlo.
+        self._pending_cycle_cmd: Optional[str] = None
+        self.boxes_completed: int = 0           # Cajas procesadas en modo trayectoria unica
+        self.active_trajectory_name: Optional[str] = None   # Nombre de la trayectoria en RAM
+
+        # Estado de la cinta transportadora reportado por el firmware (EVT:CINTA,<estado>)
+        self.conveyor_state: str = "DESCONOCIDO"
 
         # Componentes del sistema
         self.repository = TrajectoryRepository(storage_dir="trajectories", expected_columns=4)
@@ -96,6 +116,7 @@ class RobotController:
         self.ui_update_callback = None
         self.prompt_save_callback: Optional[Callable[[str], None]] = None
         self.trajectory_loaded_callback = None
+        self.conveyor_update_callback: Optional[Callable[[str], None]] = None
 
         # Variables para simulacion
         self.active_trajectory = None
@@ -134,6 +155,12 @@ class RobotController:
             if self.uart.connect():
                 self.logger.info("Conexión UART establecida exitosamente.")
                 self.request_idle_state()
+                # Sincroniza estado de la FSM y de la cinta (EVT:STATE + EVT:CINTA). Sin esto la
+                # tarjeta de la cinta quedaria en DESCONOCIDO hasta su primer cambio de estado.
+                # En FAULT/EMERGENCY no: la salida del bloqueo la decide el operador con RESET
+                # (reset_fault), que ya resincroniza via STATUS o M999 segun corresponda.
+                if self.current_state not in (SystemState.FAULT, SystemState.EMERGENCY):
+                    self._dispatch_command("STATUS", "Sincronizacion inicial de estado")
                 return True
             if attempt < max_retries:
                 self.logger.debug(f"Fallo en el intento {attempt}. Reintentando en {delay_seconds}s...")
@@ -157,6 +184,10 @@ class RobotController:
 
         # Desconexión (Hardware Sleep)
         if self.is_connected:
+            # El firmware solo acepta M98 desde Idle/Manual/AutoReady: si hay una trayectoria
+            # en curso o pausada, primero se la saca con M99 (AutoRunning/AutoPaused -> Idle).
+            if self.current_state in (SystemState.AUTO_RUNNING, SystemState.AUTO_PAUSED):
+                self.uart.send_message("M99")
             self.logger.debug("Enviando comando M98 (Hardware Sleep / Go to INIT)...")
             self.uart.send_message("M98")
             time.sleep(0.1)
@@ -164,6 +195,7 @@ class RobotController:
         # Desconexión física a través de la capa de comunicación
         self.uart.disconnect()
         self._change_internal_state(SystemState.INIT)
+        self._set_conveyor_state("DESCONOCIDO")
         self.logger.info("Desconexión finalizada de manera segura. Sistema Offline.")
 
 
@@ -190,6 +222,8 @@ class RobotController:
 
             # Eventos de cambio de estado
             elif clean_msg.startswith("ACK_M"):
+                if clean_msg == f"ACK_{self._pending_cycle_cmd}":
+                    self._pending_cycle_cmd = None
                 self._handle_state_ack(clean_msg)
                 if clean_msg == "ACK_M112":
                     self.logger.debug("ACK_M112 Recibido desde firmware. Notificando al Streamer.")
@@ -203,8 +237,16 @@ class RobotController:
             # Rechazos del firmware (ej. ERR:RESET_TOO_SOON, ERR:INVALID_STATE). Sin este caso
             # quedaban invisibles (nivel debug generico) y un reset rechazado parecia que el
             # boton "no hacia nada".
+            elif clean_msg == "ERR:NOT_AT_HOME":
+                # Rechazo de M110: no pertenece al ciclo automatico (no pasa por _on_firmware_error)
+                self.logger.warning(
+                    "Grabacion denegada: lleve el robot a Home (pulsador izquierdo del joystick) "
+                    "y vuelva a presionar GRABAR."
+                )
+
             elif clean_msg.startswith("ERR:"):
                 self.logger.warning(f"Firmware rechazo el comando: {clean_msg}")
+                self._on_firmware_error()
 
             # Mensaje no reconocido
             else:
@@ -229,9 +271,12 @@ class RobotController:
             # Si estamos simulando salimos sin procesar la telemetria real
             if self._is_simulating: return
 
-            # Entregar datos al modelo cinematico y actualizar estado
-            s1_rad, s2_rad, s3_rad = np.deg2rad(s1_deg), np.deg2rad(s2_deg), np.deg2rad(s3_deg)
-            self.robot.update_state(s1_rad, s2_rad, s3_rad)
+            # Entregar datos al modelo cinematico y actualizar estado (solo si cambiaron)
+            joints_deg = (s1_deg, s2_deg, s3_deg)
+            if joints_deg != self._last_telemetry_joints:
+                s1_rad, s2_rad, s3_rad = np.deg2rad(s1_deg), np.deg2rad(s2_deg), np.deg2rad(s3_deg)
+                self.robot.update_state(s1_rad, s2_rad, s3_rad)
+                self._last_telemetry_joints = joints_deg
             self.actuator_active = is_actuator_on
             kin_array = self.robot.get_angular_state()
 
@@ -286,11 +331,37 @@ class RobotController:
             self.logger.info("Interrupcion EVT:SENSOR recibida.")
 
             # Ejecutamos solo si estamos esperando
-            if self.current_state == SystemState.AUTO_WAITING_SENSOR:
-                self.logger.info(f"Objeto detectado. Iniciando trayectoria [{self.current_recipe_step + 1}/{len(self.active_recipe)}].")
-                self.execute_auto()
+            with self._cycle_lock:
+                if self.current_state != SystemState.AUTO_WAITING_SENSOR or not self._cycle_active:
+                    self.logger.debug("EVT:SENSOR ignorado. Sistema no esta en ciclo de espera.")
+                elif self.streamer.state != StreamState.IDLE:
+                    # Proteccion ante doble disparo: el estado pasa a AUTO_RUNNING recien con ACK_M112
+                    self.logger.debug("EVT:SENSOR ignorado. Ya hay una trayectoria en lanzamiento.")
+                else:
+                    total = len(self._cycle_sequence())
+                    self.logger.info(f"Objeto detectado. Iniciando trayectoria [{self.current_recipe_step + 1}/{total}].")
+                    self._pending_cycle_cmd = "M112"
+                    if not self.execute_auto():
+                        self._pending_cycle_cmd = None
+                        self.logger.error("No se pudo lanzar la trayectoria. Deteniendo ciclo automatico.")
+                        self.stop_palletizing()
+
+        elif event_msg.startswith("CINTA,"):
+            self._set_conveyor_state(event_msg[len("CINTA,"):])
+
+        elif event_msg.startswith("BOOT,"):
+            # El firmware arranco (o se reinicio, p. ej. por el watchdog) con el puerto abierto:
+            # su estado real es Init y cualquier operacion en curso se perdio.
+            causa = event_msg[len("BOOT,"):]
+            if self.current_state == SystemState.INIT:
+                self.logger.info(f"Firmware iniciado (causa: {causa}).")
             else:
-                self.logger.debug("EVT:SENSOR ignorado. Sistema no esta en ciclo de espera.")
+                self._enter_lockdown_state(
+                    SystemState.FAULT,
+                    f"El firmware se reinicio (causa: {causa}). Presione RESET para resincronizar.",
+                    source="LINK_LOST"
+                )
+                self._set_conveyor_state("DESHABILITADA")
 
         elif event_msg == "AUTO_COMPLETE":
             # El firmware termino de drenar la FIFO tras confirmar M116 (fin de envio) y
@@ -300,11 +371,13 @@ class RobotController:
 
             if self.current_state != SystemState.AUTO_RUNNING:
                 self.logger.debug("EVT:AUTO_COMPLETE ignorado. Sistema no esta en AUTO_RUNNING.")
-            elif len(self.active_recipe) > 0:
-                self.logger.debug("Segmento de palletizado concluido. Avanzando receta...")
-                self._advance_recipe()
             else:
-                self._change_internal_state(SystemState.AUTO_READY)
+                with self._cycle_lock:
+                    if self._cycle_active:
+                        self.logger.debug("Segmento de palletizado concluido. Avanzando ciclo...")
+                        self._advance_recipe()
+                    else:
+                        self._change_internal_state(SystemState.AUTO_READY)
 
         else:
             self.logger.warning(f"Evento de hardware no reconocido: {event_msg}")
@@ -330,7 +403,19 @@ class RobotController:
             return
 
         self.logger.info(f"Resincronizando estado con el firmware: {actual_state.value}.")
+
+        if actual_state in (SystemState.FAULT, SystemState.EMERGENCY):
+            # El bloqueo es real en el firmware: la salida correcta es M999 (ver reset_fault),
+            # aunque se haya llegado aca desde una perdida de enlace (LINK_LOST).
+            self._fault_source = "FIRMWARE"
+            self.streamer.reset()
+
         self._change_internal_state(actual_state)
+
+        if actual_state == SystemState.AUTO_READY and not self._cycle_active:
+            # La PC no tiene un ciclo activo (p. ej. tras una perdida de enlace): la cinta no
+            # debe quedar armada en el firmware sin nadie que atienda sus EVT:SENSOR.
+            self._dispatch_command("M121", "Desarmar cinta tras resincronizacion")
 
     def _handle_state_ack(self, ack_msg: str) -> None:
         """
@@ -343,7 +428,9 @@ class RobotController:
         # ACK_M116 no cambia de estado aca: la transicion real (AUTO_RUNNING -> AUTO_READY)
         # llega despues, de forma asincrona, como EVT:AUTO_COMPLETE (ver _handle_async_event),
         # porque el firmware puede tardar en drenar la FIFO restante antes de completar.
-        ignored_state_acks = ["ACK_M3", "ACK_M5", "ACK_M116"]
+        # ACK_M120/M121/M122 (cinta) tampoco: el estado de la cinta llega aparte como EVT:CINTA.
+        # ACK_M00 llega tras la parada de emergencia, que ya se proceso localmente (EVT:EMERGENCY).
+        ignored_state_acks = ["ACK_M00", "ACK_M116", "ACK_M120", "ACK_M121", "ACK_M122"]
         if ack_msg in ignored_state_acks:
             return
 
@@ -356,6 +443,15 @@ class RobotController:
                 new_state = SystemState.AUTO_PAUSED
             elif self.current_state == SystemState.AUTO_PAUSED:
                 new_state = SystemState.AUTO_READY
+                # Cancelar una trayectoria pausada termina el ciclo automatico (el firmware ya
+                # desarmo la cinta al entrar a AutoReady desde AutoPaused). El streamer queda a
+                # mitad de envio (STREAMING): sin el reset, la siguiente ejecucion se rechazaria
+                # por "streaming en progreso" y el ciclo ignoraria cada EVT:SENSOR posterior.
+                self.streamer.reset()
+                with self._cycle_lock:
+                    if self._cycle_active:
+                        self._end_cycle()
+                        self._rewind_recipe_view()
             else:
                 self.logger.warning(f"ACK_M113 recibido en estado inesperado: {self.current_state.value}.")
                 return
@@ -415,6 +511,12 @@ class RobotController:
                 self.logger.warning("No se recopilaron datos.")
 
         
+        # Cualquier salida del modo automatico hacia un estado no-AUTO termina el ciclo (el
+        # firmware desarma la cinta por su cuenta al entrar a esos estados).
+        if new_state in (SystemState.INIT, SystemState.IDLE, SystemState.MANUAL,
+                         SystemState.RECORDING, SystemState.FAULT, SystemState.EMERGENCY):
+            self._end_cycle()
+
         # Acciones de entrada al nuevo estado
         if new_state == SystemState.RECORDING:
             # Limpiar buffer
@@ -427,9 +529,10 @@ class RobotController:
                 if getattr(self, 'active_trajectory', None) is not None:
                     self.logger.debug("Purgando cache de trayectoria automatica.")
                     self.active_trajectory = None
+                    self.active_trajectory_name = None
 
                     if self.trajectory_loaded_callback is not None:
-                        self.trajectory_loaded_callback("")
+                        self.trajectory_loaded_callback({})
 
             self.streamer.reset()
 
@@ -648,59 +751,180 @@ class RobotController:
 
         return True
     
+    def _cycle_sequence(self) -> List[str]:
+        """
+        Secuencia de trayectorias del ciclo automatico: la receta cargada o, si no hay receta,
+        la trayectoria unica en memoria (que se repite en cada caja).
+        """
+        if self.active_recipe:
+            return list(self.active_recipe)
+        if self.active_trajectory_name and getattr(self, 'active_trajectory', None) is not None:
+            return [self.active_trajectory_name]
+        return []
+
     def start_palletizing(self) -> bool:
         """
-        Arma el sistema y lo pone en espera del primer EVT:SENSOR.
+        Inicia el ciclo automatico: arma la cinta (M120) y queda a la espera de EVT:SENSOR.
+        Cada caja detectada dispara la trayectoria del paso actual (ver _handle_async_event).
         """
-        # Validacion de Estado
-        if self.current_state != SystemState.AUTO_READY:
-            self.logger.warning(f"Fallo al iniciar palletizado. Requiere modo AUTO_READY.")
-            return False
-        
-        # Validacion de Receta
-        if not self.active_recipe:
-            self.logger.warning("Fallo al iniciar palletizado. No hay receta cargada.")
-            return False
-        
-        self.current_recipe_step = 0
-        primera_caja = self.active_recipe[0]
-        
-        self.logger.info("Armando estación de palletizado...")
-        if self.load_trajectory(primera_caja):
-            self._change_internal_state(SystemState.AUTO_WAITING_SENSOR)
-            return True
-        return False
-    
-    def stop_palletizing(self) -> None:
-        """"
-        Aborta la receta de forma segura.
-        """
-        if len(self.active_recipe) > 0:
-            self.logger.info("Abortando ciclo de palletizado. Rebobinando")
-            self.current_recipe_step = 0  # Rebobinamos
+        with self._cycle_lock:
+            # Validacion de Estado
+            if self.current_state != SystemState.AUTO_READY:
+                self.logger.warning(f"Fallo al iniciar ciclo. Requiere modo AUTO_READY.")
+                return False
 
-        if self.current_state == SystemState.AUTO_WAITING_SENSOR:
-            self._change_internal_state(SystemState.AUTO_READY)
+            if self._is_simulating:
+                self.logger.warning("Fallo al iniciar ciclo. Detenga la simulacion primero.")
+                return False
+
+            # Validacion de Trayectoria / Receta
+            sequence = self._cycle_sequence()
+            if not sequence:
+                self.logger.warning("Fallo al iniciar ciclo. No hay trayectoria ni receta cargada.")
+                return False
+
+            # Validacion RTH de TODOS los pasos al iniciar (y no recien con una caja frente al
+            # robot a mitad de pallet)
+            for name in sequence:
+                matrix = self.repository.load_trajectory(name)
+                if matrix.size == 0:
+                    self.logger.error(f"Fallo al iniciar ciclo. No se pudo leer la trayectoria '{name}'.")
+                    return False
+                if not self._validate_rth(matrix):
+                    self.logger.error(f"Fallo al iniciar ciclo. La trayectoria '{name}' no vuelve a Home.")
+                    return False
+
+            self.current_recipe_step = 0
+            if not self.active_recipe:
+                self.boxes_completed = 0
+
+            self.logger.info("Armando ciclo automatico...")
+            if not self.load_trajectory(sequence[0]):
+                return False
+
+            # El orden importa: primero el estado y despues M120, para que un EVT:SENSOR
+            # inmediato (caja ya presente al armar) sea aceptado.
+            self._cycle_active = True
+            self._change_internal_state(SystemState.AUTO_WAITING_SENSOR)
+
+            self._pending_cycle_cmd = "M120"
+            if not self._dispatch_command("M120", "Armar cinta transportadora"):
+                self._pending_cycle_cmd = None
+                self.stop_palletizing()
+                return False
+            return True
+
+    def stop_palletizing(self) -> None:
+        """
+        Detiene el ciclo automatico de forma segura (desarma la cinta) y rebobina la receta.
+        Si la trayectoria de la caja actual ya fue lanzada (M112 en vuelo), se deja terminar:
+        abortar el streamer ahi dejaria al firmware en AutoRunning sin datos (-> Fault por
+        timeout de FIFO). Al completar, EVT:AUTO_COMPLETE vuelve a AUTO_READY (ciclo inactivo).
+        """
+        with self._cycle_lock:
+            was_active = self._cycle_active
+            self._end_cycle()
+            if was_active:
+                self._rewind_recipe_view()
+
+            # Tambien si la cinta quedo armada sin ciclo (p. ej. tras una resincronizacion)
+            conveyor_armed = self.conveyor_state in ("AVANZANDO", "ESPERANDO_PICK")
+            if (was_active or conveyor_armed) and self.is_connected:
+                self._dispatch_command("M121", "Desarmar cinta transportadora")
+
+            if self.current_state == SystemState.AUTO_WAITING_SENSOR:
+                if self.streamer.state != StreamState.IDLE:
+                    self.logger.info("Trayectoria ya lanzada: se completa la caja en curso y el ciclo termina.")
+                else:
+                    self._change_internal_state(SystemState.AUTO_READY)
+
+    def _end_cycle(self) -> None:
+        """
+        Marca el fin del ciclo automatico y rebobina la receta. No envia comandos: cada llamador
+        decide si hace falta desarmar la cinta (en Fault/Emergency/Idle el firmware ya lo hace).
+        """
+        if not self._cycle_active:
+            return
+        self._cycle_active = False
+        self.current_recipe_step = 0
+        self.logger.info("Ciclo automatico finalizado. Receta rebobinada.")
+
+    def _rewind_recipe_view(self) -> None:
+        """
+        Con receta, la RAM y la etiqueta vuelven al paso 0 (si no, SIMULAR previsualizaria el
+        ultimo paso ejecutado y la UI mostraria "CAJA n/N" de un ciclo que ya no existe).
+        Solo en detenciones pedidas por el usuario: lee de disco, y no debe demorar el hilo RX
+        en la cascada de Fault/Emergency.
+        """
+        if self.active_recipe:
+            self._load_trajectory_file(self.active_recipe[0])
+
+    def _on_firmware_error(self) -> None:
+        """
+        Atiende un ERR:* del firmware solo si responde a un comando del ciclo pendiente de ACK
+        (M120 o M112): sin esto la PC quedaria esperando una caja o un ACK_M112 que nunca llegan.
+        Se aborta el ciclo (aunque el usuario ya lo hubiera detenido con la trayectoria en vuelo)
+        y se resincroniza con el firmware. Un ERR ajeno (ej. M113 tardio) no afecta al ciclo.
+        """
+        with self._cycle_lock:
+            if self._pending_cycle_cmd is None:
+                return
+            if self.current_state != SystemState.AUTO_WAITING_SENSOR:
+                self._pending_cycle_cmd = None
+                return
+
+            self.logger.error(
+                f"El firmware rechazo {self._pending_cycle_cmd} del ciclo automatico. "
+                "Deteniendo y resincronizando."
+            )
+            self._pending_cycle_cmd = None
+            self.streamer.reset()
+            self.stop_palletizing()
+            if self.current_state == SystemState.AUTO_WAITING_SENSOR:
+                self._change_internal_state(SystemState.AUTO_READY)
+            self._dispatch_command("STATUS", "Resincronizacion tras rechazo en ciclo automatico")
 
     def unload_recipe(self) -> None:
         """
         Llamado explícitamente por la GUI cuando el usuario cierra la receta 
         o presiona un botón de 'Limpiar'.
         """
+        if self._cycle_active:
+            self.logger.warning("Descarga de memoria denegada. Detenga el ciclo automatico primero.")
+            return
+
         self.logger.info("Descargando receta de palletizado de la memoria.")
         self.active_recipe.clear()
         self.current_recipe_step = 0
         self.pallets_completed = 0
+        self.boxes_completed = 0
         self.active_trajectory = None
+        self.active_trajectory_name = None
         
         # Avisar a la GUI que ya no hay archivo cargado
         if self.trajectory_loaded_callback is not None:
-            self.trajectory_loaded_callback("")
+            self.trajectory_loaded_callback({})
 
     def _advance_recipe(self) -> None:
         """
         Lógica interna de avance del ciclo al completar una trayectoria.
+        Con receta avanza al siguiente paso; con trayectoria unica la reutiliza.
         """
+        # Modo trayectoria unica: la matriz ya esta en RAM, solo se cuenta la caja
+        if not self.active_recipe:
+            self.boxes_completed += 1
+            self.logger.info(f"Caja completada. Total: {self.boxes_completed}.")
+
+            self._current_progress = 0
+            if self.trajectory_loaded_callback is not None:
+                self.trajectory_loaded_callback({
+                    'type': 'SINGLE',
+                    'name': self.active_trajectory_name or "",
+                    'boxes': self.boxes_completed
+                })
+            self._change_internal_state(SystemState.AUTO_WAITING_SENSOR)
+            return
+
         self.current_recipe_step += 1
         
         # Se completó el pallet?
@@ -713,14 +937,15 @@ class RobotController:
         next_trajectory = self.active_recipe[self.current_recipe_step]
         self.logger.debug(f"Precargando siguiente bloque en RAM: '{next_trajectory}'")
         
-        # Transicionamos temporalmente a AUTO_READY para autorizar la carga
-        self._change_internal_state(SystemState.AUTO_READY)
-        
-        if self.load_trajectory(next_trajectory):
+        # Carga directa (sin pasar por un AUTO_READY transitorio, que abriria una ventana para
+        # comandos de la GUI a mitad del ciclo)
+        self._current_progress = 0
+        if self._load_trajectory_file(next_trajectory):
             # Quedamos a la espera del próximo evento de barrera
             self._change_internal_state(SystemState.AUTO_WAITING_SENSOR)
         else:
             self.logger.error("Fallo irrecuperable al precargar. Abortando pallet.")
+            self._change_internal_state(SystemState.AUTO_READY)
             self.stop_palletizing()
 
     # ==== GESTION DE TRAYECTORIAS Y EJECUCION ====
@@ -750,6 +975,8 @@ class RobotController:
         if len(self.active_recipe) > 0:
             self.logger.debug("Purgando receta activa por carga de trayectoria manual.")
             self.active_recipe.clear()
+
+        self.boxes_completed = 0
             
         # Llama al método base para cargar en RAM y notificar a la UI
         return self.load_trajectory(trajectory_name)
@@ -765,7 +992,14 @@ class RobotController:
         if self.current_state != SystemState.AUTO_READY:
             self.logger.warning(f"Carga de archivo denegada. Incompatibilidad de estado.")
             return False
-        
+
+        return self._load_trajectory_file(trajectory_name)
+
+    def _load_trajectory_file(self, trajectory_name: str) -> bool:
+        """
+        Carga efectiva en RAM y notificacion a la UI, sin guarda de estado. Uso interno del
+        ciclo automatico (avance de receta y rebobinado), que ya garantiza la coherencia.
+        """
         # Interaccion con la capa de persistencia
         matrix = self.repository.load_trajectory(trajectory_name)
         if matrix.size == 0:
@@ -774,6 +1008,7 @@ class RobotController:
         
         # Almacenamiento en cache local del orquestador
         self.active_trajectory = matrix
+        self.active_trajectory_name = trajectory_name
         self.logger.info(f"Trayectoria '{trajectory_name}' cargada exitosamente. Cant. de puntos: {self.active_trajectory.shape[0]}")
 
         # Invocacion de callback hacia UI para notificar que la trayectorai esta cargada.
@@ -788,7 +1023,11 @@ class RobotController:
                 })
             else:
                 # Modo normal
-                self.trajectory_loaded_callback({'type': 'SINGLE', 'name': trajectory_name})
+                self.trajectory_loaded_callback({
+                    'type': 'SINGLE',
+                    'name': trajectory_name,
+                    'boxes': self.boxes_completed
+                })
 
         return True
     
@@ -853,8 +1092,7 @@ class RobotController:
             return False
 
         self.logger.debug("Delegando envio de trayectoria al TrajectoryStreamer.")
-        self.streamer.start_streaming(hardware_trajectory)
-        return True
+        return self.streamer.start_streaming(hardware_trajectory)
 
     def stop_trajectory(self) -> bool:
         """
@@ -902,45 +1140,38 @@ class RobotController:
         return False
 
 
-    # ==== CONTROL DE HERRAMIENTA ====
-    def toggle_actuator(self) -> bool:
+    # ==== CONTROL DE CINTA ====
+    def toggle_conveyor(self) -> bool:
         """
-        Alterna el estado lógico del actuador principal.
-        
+        Marcha/parada manual de la cinta (M122). Solo fuera del ciclo automatico (IDLE/MANUAL):
+        sirve para probar, calibrar o despejar la cinta. El firmware igual la frena al detectar.
+
         Retorno:
             bool: True si el comando fue encolado, False en caso de error o bloqueo de seguridad.
         """
         # Condición de Guarda
-        estados_permitidos = [SystemState.IDLE, SystemState.MANUAL, SystemState.AUTO_READY]
-        if self.current_state not in estados_permitidos:
+        if self.current_state not in [SystemState.IDLE, SystemState.MANUAL]:
             self.logger.warning(
-                "Accionamiento de herramienta denegado. "
+                "Marcha manual de cinta denegada. "
                 f"El estado '{self.current_state.value}' no permite control manual."
             )
             return False
 
-        if not self.is_connected:
-            self.logger.warning("Comando denegado: El sistema está desconectado.")
-            return False
+        if self.conveyor_state == "MANUAL":
+            return self._dispatch_command("M122 S0", "Detener cinta (marcha manual)")
+        return self._dispatch_command("M122", "Marcha manual de cinta")
 
-        if self.actuator_active:
-            cmd = "M5"
-            action_desc = "Apagar Actuador (Soltar)"
-        else:
-            cmd = "M3"
-            action_desc = "Encender Actuador (Agarrar)"
+    def _set_conveyor_state(self, state: str) -> None:
+        """
+        Actualiza el estado de la cinta reportado por el firmware y notifica a la UI.
+        """
+        state = state.strip()
+        if state != self.conveyor_state:
+            self.logger.info(f"Cinta: {state}.")
+        self.conveyor_state = state
 
-        self.logger.info(f"Solicitando {action_desc} (Comando {cmd})...")
-        
-        # Nota: Usamos uart.send_message directamente y no _dispatch_command() 
-        # porque M3/M5 no representan una transición de la Máquina de Estados
-        transmission_success = self.uart.send_message(cmd)
-        
-        if not transmission_success:
-            self.logger.error(f"Fallo de comunicación: Buffer TX lleno al intentar enviar {cmd}.")
-            return False
-
-        return True
+        if self.conveyor_update_callback is not None:
+            self.conveyor_update_callback(state)
 
     
     # ==== SIMULACION DE TRAYECTORIAS ====
@@ -1014,19 +1245,24 @@ class RobotController:
             # Apagamos el flag. En los próximos 20 milisegundos, la telemetría viva del 
             # hardware volverá a entrar, el brazo "saltará" a la realidad, indicando 
             # visualmente que la simulación terminó.
+            # El modelo cinematico quedo con la pose simulada: forzar que la proxima trama real
+            # recalcule aunque traiga los mismos angulos que antes de simular. Se invalida ANTES
+            # de bajar la bandera, para que ninguna trama intermedia reuse la pose simulada.
+            self._last_telemetry_joints = None
             self._is_simulating = False
 
     def stop_simulation(self):
         """
         Detiene el hilo de simulación y limpia la UI.
         """
+        self._last_telemetry_joints = None   # ver _simulation_worker (pose simulada en el modelo)
         self._is_simulating = False
         self.logger.info("Simulación detenida por el usuario.")
         # Enviamos un último callback con progreso 0 para limpiar la barra en la UI
         if self.ui_update_callback:
             self.ui_update_callback(
                 self.robot.get_cartesian_state(),
-                self.robot.get_joint_state(),
+                np.rad2deg(self.robot.get_angular_state()).tolist(),
                 self.current_state,
                 self.actuator_active,
                 0 
@@ -1040,11 +1276,11 @@ class RobotController:
         """
         self.logger.info("Emitiendo comando de parada de emergencia de hardware.")
 
-        # Inyeccion del comando a la cola de transmision
-        transmission_success = self.uart.send_message("M00")
-
-        if not transmission_success:
-            self.logger.error("FALLO CATASTROFICO. Buffer UART colapsado. Imposible emitir M00.")
+        # Escritura directa al puerto, salteando la cola TX (no espera detras de un chunk)
+        if not self.is_connected:
+            self.logger.warning("Sin enlace serial: la parada de emergencia se aplica solo en la PC.")
+        elif not self.uart.send_urgent("M00"):
+            self.logger.error("FALLO CATASTROFICO. Imposible emitir M00 por el puerto serial.")
 
         # Bloqueo incondicional de la maquina de estados local
         self._force_emergency_stop("Activacion de emergencia por software.")
@@ -1127,6 +1363,7 @@ class RobotController:
             "Conexion con el firmware perdida inesperadamente.",
             source="LINK_LOST"
         )
+        self._set_conveyor_state("DESCONOCIDO")
 
 
     # ==== METODOS AUXILIARES ====
@@ -1135,8 +1372,8 @@ class RobotController:
         if self.ui_update_callback:
             self.ui_update_callback(
                 self.robot.get_cartesian_state(),
-                self.robot.get_angular_state(),
+                np.rad2deg(self.robot.get_angular_state()).tolist(),   # grados, como la telemetria
                 self.current_state,
-                self.actuator_active,             # AHORA usa el booleano
+                self.actuator_active,
                 progress
             )

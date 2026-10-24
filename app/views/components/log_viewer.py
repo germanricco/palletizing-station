@@ -63,6 +63,8 @@ class LogViewer(QWidget):
         color_map = {
             "INFO": AppConfig.COLORS.SEMANTIC_MANUAL, # #00F0FF (Cian)
             "WARN": AppConfig.COLORS.SEMANTIC_RECORD, # #FF9500 (Ámbar)
+            "WARNING": AppConfig.COLORS.SEMANTIC_RECORD,  # Nombre real de logging.WARNING
+            "CRITICAL": AppConfig.COLORS.SEMANTIC_ESTOP,
             "ERROR": AppConfig.COLORS.SEMANTIC_ESTOP  # #FF3B30 (Rojo)
         }
         level_color = color_map.get(level.upper(), AppConfig.COLORS.TEXT_HIGH)
@@ -82,7 +84,7 @@ class LogViewer(QWidget):
 
         # Si es un error, el design handoff requiere un fondo especial,
         # en QPlainTextEdit se simula mejor resaltando todo el texto en HTML.
-        if level.upper() == "ERROR":
+        if level.upper() in ("ERROR", "CRITICAL"):
             log_line = f"<div style='background-color: rgba(255, 59, 48, 0.2);'>{log_line}</div>"
 
         # Añadir mediante appendHtml para procesar los estilos en línea

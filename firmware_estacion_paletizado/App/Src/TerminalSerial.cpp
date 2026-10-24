@@ -316,9 +316,19 @@ void TerminalSerial::interrupcionRecepcionByte() {
      * procese comandos mediante limpiarComandoPendiente().
      */
 	if (_rxCount >= RX_QUEUE_LEN) {
-	        HAL_UART_Receive_IT(_huart, const_cast<uint8_t*>(&_rxByte), 1);
-	        return;
-	    }
+		// Cola llena: el byte se pierde y la linea en curso queda incompleta. Hay que descartarla
+		// entera; si no, su resto se pegaria al fragmento ya guardado (comando corrupto).
+		if (_rxByte == '\n') {
+			// Fin de la linea perdida: se descarta el fragmento y la proxima arranca limpia
+			_rxIndex = 0U;
+			_rxOverflow = false;
+		} else if (_rxByte != '\r') {
+			// Byte de datos perdido: descartar el resto de la linea hasta su '\n'
+			_rxOverflow = true;
+		}
+		HAL_UART_Receive_IT(_huart, const_cast<uint8_t*>(&_rxByte), 1);
+		return;
+	}
 
 	if (_rxByte == '\r') {
 		// Ignoramos CR (\r) para limpiar formato nativo.

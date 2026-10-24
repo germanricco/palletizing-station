@@ -45,7 +45,44 @@ namespace Config {
 	constexpr float SERVO_CODO_MAX_SPEED = 10.0f;
 	constexpr int32_t SERVO_CODO_ACCEL_DIVISOR = 8;
 
+	// Tolerancia para considerar el robot en Home (misma que la validacion Return-To-Home de la PC)
+	constexpr float HOME_TOLERANCIA_GRADOS = 2.0f;
+
 	// Actuador
+
+	/**
+	 * ======== CINTA TRANSPORTADORA ========
+	 */
+	// Velocidad nominal normalizada [0.0 a 1.0]. Con TIM2 ARR=49 (PWM 20kHz, 50 pasos) y
+	// CINTA_MIN_CCR=0, MotorDC trunca v*49: 0.25 -> CCR=12 (24%), 0.27 -> CCR=13 (26%).
+	// El 25% exacto no es representable (seria CCR=12.5).
+	constexpr float CINTA_VELOCIDAD_NOMINAL = 0.27f;
+
+	// Duracion de la rampa lineal de arranque. Evita que la caja patine y limita el pico de
+	// corriente de arranque del motor. El frenado es siempre inmediato (precision de parada).
+	constexpr uint32_t CINTA_RAMPA_ARRANQUE_MS = 300U;
+
+	// Umbral minimo de CCR para vencer la friccion estatica (ver MotorDC). Ojo: modificarlo
+	// cambia el duty efectivo de CINTA_VELOCIDAD_NOMINAL.
+	constexpr uint32_t CINTA_MIN_CCR = 0U;
+
+	// Retardo entre el fin de la trayectoria (FIFO vacia tras M116) y la liberacion de la cinta.
+	// En reproduccion automatica los servos se comandan en DirectPosition (sin realimentacion ni
+	// limite de slew), asi que el firmware no puede saber cuando el brazo llego fisicamente a
+	// Home: se espera un tiempo fijo para que el servo real asiente antes de mover la cinta.
+	constexpr uint32_t CINTA_RETARDO_LIBERACION_MS = 500U;
+
+	// Antirrebote del sensor IR de fin de cinta (FC-51, activo en bajo, PB12).
+	constexpr uint32_t SENSOR_IR_DEBOUNCE_MS = 30U;
+
+	/**
+	 * ======== SEGURIDAD ========
+	 */
+	// Watchdog independiente (IWDG, oscilador LSI ~40 kHz, rango 30-60 kHz): prescaler /32 y recarga
+	// 1250 -> ~1 s nominal (0.67 s en el peor caso). El loop principal dura < 1 ms y no tiene esperas
+	// bloqueantes: solo dispara si el firmware se cuelga, y el reset deja las salidas PWM apagadas.
+	constexpr uint32_t IWDG_PRESCALER_DIV32 = 3U;
+	constexpr uint32_t IWDG_RECARGA = 1250U;
 
 	/**
 	 * ======== CALIBRACION DE ENTRADAS ANALOGICAS (JOYSTICKS) ========

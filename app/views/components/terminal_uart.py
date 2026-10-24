@@ -49,12 +49,15 @@ class TerminalUART(QWidget):
         self.input_field.setPlaceholderText("Ingrese comando manual...")
         self.input_field.setFixedHeight(48)
         self.input_field.setStyleSheet(
-            f"background-color: #0A0A0A;"
-            f"border: 1px solid {AppConfig.COLORS.BORDERS};"
-            f"color: {AppConfig.COLORS.TEXT_HIGH};"
-            f"padding-left: 16px;"
-            f"font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
-            f"font-size: {AppConfig.TYPOGRAPHY.SIZE_HUD_CONSOLE};"
+            f"QLineEdit {{"
+            f"  background-color: #0A0A0A;"
+            f"  border: 1px solid {AppConfig.COLORS.BORDERS};"
+            f"  color: {AppConfig.COLORS.TEXT_HIGH};"
+            f"  padding-left: 16px;"
+            f"  font-family: {AppConfig.TYPOGRAPHY.FAMILY_DATA};"
+            f"  font-size: {AppConfig.TYPOGRAPHY.SIZE_HUD_CONSOLE};"
+            f"}}"
+            f"QLineEdit:disabled {{ color: #555555; border-color: #2A2A2A; }}"
         )
         
         # Instalamos un filtro de eventos para capturar flechas direccionales
@@ -77,6 +80,7 @@ class TerminalUART(QWidget):
             f"QPushButton:hover {{"
             f"  background-color: #444444;"
             f"}}"
+            f"QPushButton:disabled {{ background-color: #1A1A1A; color: #555555; }}"
         )
 
         # Se activa al pulsarse. Conectamos la senal al metodo / slot
@@ -149,8 +153,7 @@ class TerminalUART(QWidget):
         # Si cambió, actualizo mi registro y aplico los cambios pesados
         self._current_enable_state = is_enabled
         
+        # El aspecto deshabilitado lo resuelven los pseudo-estados :disabled del QSS
+        # ('opacity' no es una propiedad QSS valida para QWidget).
         self.input_field.setEnabled(is_enabled)
         self.btn_send.setEnabled(is_enabled)
-        
-        opacity = "1.0" if is_enabled else "0.5"
-        self.setStyleSheet(f"opacity: {opacity};")
