@@ -1273,7 +1273,8 @@ void Controller::onEnterPickRecovery(void) {
 }
 
 void Controller::onEnterPickAlarm(void) {
-    Logger::logERROR("FSM -> PickAlarm (%s). Esperando al operador (M115 / M113).",
+    // Corto a proposito: "[tttttttt] [ERROR] " + texto + "\r\n" debe entrar en el slot TX (95)
+    Logger::logERROR("FSM -> PickAlarm (%s)",
                      toString(_causaFallaPick));
     char msg[48];
     std::snprintf(msg, sizeof(msg), "EVT:PICK_ALARM,%s\r\n", toString(_causaFallaPick));
