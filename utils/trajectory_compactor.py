@@ -34,7 +34,7 @@ UMBRAL_A1 = 0.5         # a1 > umbral -> efector encendido (la GUI graba 0.0 / 1
 # eps por defecto: 0.04 grados <= 1 us de PWM en las tres articulaciones
 # (hombro 25 us/grado, codo 14.8 us/grado, base 11.1 us/grado con el mapeo de Config.hpp).
 EPS_DEG_DEFECTO = 0.04
-T_AGARRE_DEFECTO = 0.5
+T_AGARRE_DEFECTO = 2.0
 T_SUELTA_DEFECTO = 0.5
 
 
