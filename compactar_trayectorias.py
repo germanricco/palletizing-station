@@ -3,14 +3,18 @@
 Compacta trayectorias grabadas: elimina los tiempos muertos y garantiza la espera minima
 del vacio despues de cada flanco del efector (ver utils/trajectory_compactor.py).
 
+Desde la v1.1 la GUI ya guarda automaticamente la original, la compacta y el grafico al
+terminar una grabacion. Este script queda para compactar grabaciones viejas o probar otros
+parametros.
+
 Uso (desde la raiz del repo):
     python compactar_trayectorias.py                 # todas las de trajectories/
     python compactar_trayectorias.py pick_caja1      # solo esa (nombre sin .npy, o ruta)
     python compactar_trayectorias.py a b c --png     # varias, con grafico comparativo
+    python compactar_trayectorias.py --png --p-reposo 9 --p-bomba 6   # + energia estimada
 
 Por cada <nombre>.npy genera <nombre>_compacta.npy en la misma carpeta (el original no se
-toca) y, con --png, ensayos/compactar/<nombre>_compacta.png. Las *_compacta.npy se cargan
-desde la GUI con CARGAR TRAY. como cualquier otra trayectoria.
+toca) y, con --png, ensayos/compactar/<nombre>_compacta.png.
 """
 
 from __future__ import annotations
@@ -23,17 +27,17 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils.trajectory_compactor import (  # noqa: E402
-    DT_S, EPS_DEG_DEFECTO, T_AGARRE_DEFECTO, T_SUELTA_DEFECTO, compactar,
+    CARPETA_GRAFICOS, EPS_DEG_DEFECTO, POTENCIA_BOMBA_W, POTENCIA_REPOSO_W, SUFIJO_COMPACTA,
+    T_AGARRE_DEFECTO, T_SUELTA_DEFECTO, compactar, graficar_comparacion,
 )
 
 CARPETA = Path("trajectories")
-SUFIJO = "_compacta"
 
 
 def resolver_entradas(nombres: list[str]) -> list[Path]:
     """Sin nombres: todas las .npy de trajectories/ salvo las ya compactadas."""
     if not nombres:
-        return sorted(p for p in CARPETA.glob("*.npy") if not p.stem.endswith(SUFIJO))
+        return sorted(p for p in CARPETA.glob("*.npy") if not p.stem.endswith(SUFIJO_COMPACTA))
     rutas = []
     for n in nombres:
         p = Path(n)
@@ -47,29 +51,6 @@ def resolver_entradas(nombres: list[str]) -> list[Path]:
     return rutas
 
 
-def graficar(orig: np.ndarray, comp: np.ndarray, ruta: Path, titulo: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ejes = plt.subplots(4, 1, sharex=True, figsize=(10, 8))
-    t_o, t_c = np.arange(len(orig)) * DT_S, np.arange(len(comp)) * DT_S
-    nombres = ("q1 base [°]", "q2 hombro [°]", "q3 codo [°]", "a1 efector")
-    for i, (ax, nom) in enumerate(zip(ejes, nombres)):
-        conv = np.rad2deg if i < 3 else (lambda x: x)
-        ax.plot(t_o, conv(orig[:, i]), color="0.65", lw=1, label="original")
-        ax.plot(t_c, conv(comp[:, i]), lw=1.4, label="compacta")
-        ax.set_ylabel(nom)
-        ax.grid(alpha=0.3)
-    ejes[0].legend(loc="upper right")
-    ejes[0].set_title(titulo)
-    ejes[-1].set_xlabel("t [s]  (20 ms por fila)")
-    fig.tight_layout()
-    ruta.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(ruta, dpi=120)
-    plt.close(fig)
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="Elimina los tiempos muertos de trayectorias grabadas.")
     ap.add_argument("nombres", nargs="*", help="trayectorias a compactar (por defecto, todas)")
@@ -79,14 +60,19 @@ def main() -> None:
                     help=f"espera minima tras encender el efector [s] (def. {T_AGARRE_DEFECTO})")
     ap.add_argument("--t-suelta", type=float, default=T_SUELTA_DEFECTO,
                     help=f"espera minima tras apagar el efector [s] (def. {T_SUELTA_DEFECTO})")
-    ap.add_argument("--png", action="store_true", help="guardar graficos en ensayos/compactar/")
+    ap.add_argument("--png", action="store_true", help=f"guardar graficos en {CARPETA_GRAFICOS.as_posix()}/")
+    ap.add_argument("--p-reposo", type=float, default=POTENCIA_REPOSO_W,
+                    help="potencia con el brazo quieto [W] (para estimar la energia ahorrada)")
+    ap.add_argument("--p-bomba", type=float, default=POTENCIA_BOMBA_W,
+                    help="potencia adicional con la bomba encendida [W]")
     a = ap.parse_args()
 
     entradas = resolver_entradas(a.nombres)
     if not entradas:
         raise SystemExit(f"No hay trayectorias para compactar en {CARPETA}/.")
 
-    print(f"{'trayectoria':28s} {'filas':>11s} {'duracion [s]':>15s} {'ahorro':>7s}  agarre/suelta (grabada -> final)  RTH")
+    print(f"{'trayectoria':28s} {'duracion [s]':>15s} {'ahorro':>7s} {'bomba [s]':>12s} "
+          f"{'energia':>9s}  agarre/suelta (grabada -> final)  RTH")
     for ruta in entradas:
         traj = np.load(ruta, allow_pickle=False)
         try:
@@ -95,7 +81,7 @@ def main() -> None:
             print(f"{ruta.stem:28s} OMITIDA: {e}")
             continue
 
-        salida = ruta.with_name(ruta.stem + SUFIJO + ".npy")
+        salida = ruta.with_name(ruta.stem + SUFIJO_COMPACTA + ".npy")
         np.save(salida, comp)
 
         esperas = []
@@ -103,16 +89,20 @@ def main() -> None:
             minimo = a.t_agarre if f.encendido else a.t_suelta
             marca = "+" if f.pausa_grabada_s < minimo else ""
             esperas.append(f"{'A' if f.encendido else 'S'} {f.pausa_grabada_s:.2f}->{minimo:.2f}{marca}")
+        energia = inf.energia_ahorrada_j(a.p_reposo, a.p_bomba)
+        energia_txt = f"{energia:7.0f} J" if energia is not None else "      —  "
         rth = "OK" if inf.rth_deg <= 2.0 else f"FALLA ({inf.rth_deg:.1f}°)"
-        print(f"{ruta.stem:28s} {inf.n_original:5d}->{inf.n_compacta:<5d} "
-              f"{inf.t_original_s:6.1f}->{inf.t_compacta_s:<6.1f} {inf.ahorro_pct:6.0f}%  "
+        print(f"{ruta.stem:28s} {inf.t_original_s:6.1f}->{inf.t_compacta_s:<6.1f} {inf.ahorro_pct:6.0f}% "
+              f"{inf.t_bomba_original_s:5.1f}->{inf.t_bomba_compacta_s:<5.1f} {energia_txt}  "
               f"{', '.join(esperas) or 'sin flancos de a1':33s} {rth}")
 
         if a.png:
-            graficar(traj, comp, Path("ensayos") / "compactar" / f"{salida.stem}.png", ruta.stem)
+            graficar_comparacion(traj, comp, inf, CARPETA_GRAFICOS / f"{salida.stem}.png", ruta.stem,
+                                 a.p_reposo, a.p_bomba)
 
     print("\nA = agarre, S = suelta; '+' = pausa grabada mas corta que la minima (se extendio).")
-    print(f"Archivos generados: <nombre>{SUFIJO}.npy en {CARPETA}/ (los originales no se modifican).")
+    print("Energia: solo con --p-reposo y --p-bomba (o con las potencias en utils/trajectory_compactor.py).")
+    print(f"Archivos generados: <nombre>{SUFIJO_COMPACTA}.npy en {CARPETA}/ (los originales no se modifican).")
 
 
 if __name__ == "__main__":

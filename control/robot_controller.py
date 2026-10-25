@@ -7,6 +7,9 @@ from typing import Callable, Optional, List
 
 from utils.system_logger import SystemLogger
 from utils.trajectory_repository import TrajectoryRepository
+from utils.trajectory_compactor import (
+    CARPETA_GRAFICOS, DT_S, SUFIJO_COMPACTA, compactar, graficar_en_segundo_plano,
+)
 from control.robot_EEZYbotMK2 import RoboticArmMK2
 from communication.async_uart import AsyncUARTCommunicator
 from control.trajectory_streamer import TrajectoryStreamer, StreamState
@@ -29,11 +32,11 @@ class SystemState(Enum):
 
 # Causas de pick fallido informadas por el firmware (EVT:PICK_FAIL,<causa>,<intento>)
 _PICK_FAIL_CAUSES = {
-    "CAJA_RETIRADA": "La caja dejo de detectarse antes del agarre (retirada o empujada).",
-    "NO_LIBERO": "El sensor siguio viendo la caja despues de subir: la ventosa no la tomo.",
-    "OCUPADO_EN_SUELTA": "La caja seguia frente al sensor al soltar: nunca salio de la cinta.",
-    "CAJA_CAIDA": "La caja volvio a aparecer frente al sensor durante el traslado: se cayo.",
-    "SIN_AGARRE": "La trayectoria termino sin tomar la caja (sin agarre o sin liberar el sensor).",
+    "CAJA_MOVIDA": "La caja dejo de detectarse antes de levantarla: se movio o la sacaron de la cinta.",
+    "CAJA_NO_LEVANTADA": "El brazo subio pero la caja sigue en la cinta: la ventosa no la tomo (revisar vacio y posicion).",
+    "PLACE_SIN_PICK": "El brazo llego al place sin haber levantado la caja: sigue en la cinta.",
+    "CAJA_CAIDA_EN_CINTA": "Aparecio algo frente al sensor durante el traslado: probablemente la caja se solto y cayo en la cinta.",
+    "TRAYECTORIA_SIN_SUCCION": "La trayectoria termino sin encender la bomba: verifique que la trayectoria cargada sea la de pick.",
 }
 
 
@@ -1046,10 +1049,53 @@ class RobotController:
         # Si el usuario dejó el campo vacío, usamos un default
         if not filename:
             filename = f"record_{int(time.time())}"
+        if filename.lower().endswith(".npy"):
+            filename = filename[:-4]
 
-        self.repository.save_trajectory(filename, self._pending_save_matrix)
-        self.logger.info(f"Trayectoria '{filename}' guardada exitosamente.")
+        matrix = self._pending_save_matrix
         self._pending_save_matrix = None # Liberar RAM
+
+        # 1. La grabacion original va primero: pase lo que pase con la compacta, no se pierde
+        if not self.repository.save_trajectory(filename, matrix):
+            self.logger.error(f"No se pudo guardar la trayectoria '{filename}'.")
+            return
+        self.logger.info(f"Trayectoria '{filename}' guardada ({matrix.shape[0] * DT_S:.1f} s).")
+
+        # 2. Version compacta (sin tiempos muertos) + grafico comparativo en segundo plano
+        self._save_compacted_copy(filename, matrix)
+
+    def _save_compacted_copy(self, filename: str, matrix: np.ndarray) -> None:
+        """
+        Guarda <filename>_compacta.npy junto a la original y lanza el grafico comparativo
+        (ensayos/compactar/<filename>_compacta.png). Cualquier problema deja solo la original.
+        """
+        compact_name = filename + SUFIJO_COMPACTA
+        try:
+            compact, report = compactar(matrix)
+        except Exception as e:
+            self.logger.warning(f"No se pudo compactar '{filename}' ({e}). Queda solo la original.")
+            return
+
+        # La compacta conserva el primer punto y termina a < eps del final: si no vuelve a Home
+        # es porque la original tampoco lo hace (la GUI la bloqueara al ejecutar)
+        if not np.allclose(compact[0, :3], compact[-1, :3], atol=np.deg2rad(2.0)):
+            self.logger.warning(
+                f"La version compacta de '{filename}' no vuelve a Home ({report.rth_deg:.1f}°): "
+                "no se guardo. Revise que la grabacion termine en Home."
+            )
+            return
+
+        if not self.repository.save_trajectory(compact_name, compact):
+            self.logger.warning(f"No se pudo guardar '{compact_name}'. Queda solo la original.")
+            return
+
+        self.logger.info(
+            f"Version compacta '{compact_name}' guardada: {report.t_original_s:.1f} s -> "
+            f"{report.t_compacta_s:.1f} s (-{report.ahorro_pct:.0f} %), bomba encendida "
+            f"{report.t_bomba_original_s:.1f} s -> {report.t_bomba_compacta_s:.1f} s."
+        )
+        graficar_en_segundo_plano(matrix, compact, report,
+                                  CARPETA_GRAFICOS / f"{compact_name}.png", filename, self.logger)
 
     def load_single_trajectory(self, trajectory_name: str) -> bool:
         """
