@@ -111,18 +111,25 @@ namespace Station {
  *   frente al IR. Cruza el estado del IR con los flancos de a1 de los puntos consumidos:
  *
  *   Fase          a1   IR esperado   Desvio -> causa
- *   Aproximacion  0    ocupado       IR libre (>= PICK_PERSISTENCIA_MS)       -> CAJA_RETIRADA (C3)
- *   Agarre        1    ocupado       a1 1->0 con IR ocupado                   -> OCUPADO_EN_SUELTA (C2)
- *   Elevacion     1    se libera     IR ocupado tras PICK_T_LIBERACION_MS     -> NO_LIBERO (C1)
- *   Traslado      1    libre         IR ocupado (>= PICK_PERSISTENCIA_MS)     -> CAJA_CAIDA (C4)
+ *   Aproximacion  0    ocupado       IR libre (>= PICK_PERSISTENCIA_MS)       -> CAJA_MOVIDA
+ *   Agarre        1    ocupado       IR libre (>= PICK_PERSISTENCIA_MS)       -> CAJA_MOVIDA
+ *                                    a1 1->0 con IR ocupado                   -> PLACE_SIN_PICK
+ *   Elevacion     1    se libera     IR ocupado tras PICK_T_LIBERACION_MS     -> CAJA_NO_LEVANTADA
+ *                                    a1 1->0 con IR ocupado                   -> PLACE_SIN_PICK
+ *   Traslado      1    libre         IR ocupado (>= PICK_PERSISTENCIA_MS)     -> CAJA_CAIDA_EN_CINTA
  *   Liberada      0    libre         -
- *   Fin de trayectoria sin pick confirmado                                   -> SIN_AGARRE / NO_LIBERO
+ *   Fin de trayectoria: todavia en Aproximacion                              -> TRAYECTORIA_SIN_SUCCION
+ *                       en Agarre o Elevacion                                -> CAJA_NO_LEVANTADA
+ *
+ *   En Agarre el brazo todavia no se movio: un IR libre ahi no puede ser la caja subiendo (el
+ *   brazo no la levanto), sino la caja sacada de la cinta mientras la bomba succionaba.
  *
  *   El pick se confirma (EVT:PICK_OK,<ms desde el inicio de la elevacion>) cuando el IR se libera
- *   con a1=1. Ante un desvio: se vacia la FIFO, se purga el efector y el brazo vuelve a Home con
- *   rampa (SmoothPosition desde la ultima consigna). Si al llegar la caja sigue frente al IR y
+ *   en la Elevacion. Ante un desvio: se vacia la FIFO, se purga el efector y el brazo vuelve a Home
+ *   con rampa (SmoothPosition desde la ultima consigna). Si al llegar la caja sigue frente al IR y
  *   quedan reintentos (PICK_REINTENTOS_MAX), se re-emite EVT:SENSOR y la PC relanza la misma
  *   trayectoria; si no, PickAlarm espera al operador. El IR decide: sin caja no hay reintento.
+ *   TRAYECTORIA_SIN_SUCCION va siempre a PickAlarm: la misma trayectoria fallaria igual.
  *   Limitacion: una caja que cae fuera del haz durante el traslado no es detectable.
  *
  * ESTADO SEGURO POR ESTADO:
@@ -523,12 +530,12 @@ constexpr float RAD_A_GRADOS = 57.29578f;
 
 const char* Controller::toString(CausaFallaPick causa) {
     switch (causa) {
-        case CausaFallaPick::CajaRetirada:    return "CAJA_RETIRADA";
-        case CausaFallaPick::NoLibero:        return "NO_LIBERO";
-        case CausaFallaPick::OcupadoEnSuelta: return "OCUPADO_EN_SUELTA";
-        case CausaFallaPick::CajaCaida:       return "CAJA_CAIDA";
-        case CausaFallaPick::SinAgarre:       return "SIN_AGARRE";
-        default:                              return "NINGUNA";
+        case CausaFallaPick::CajaMovida:            return "CAJA_MOVIDA";
+        case CausaFallaPick::CajaNoLevantada:       return "CAJA_NO_LEVANTADA";
+        case CausaFallaPick::PlaceSinPick:          return "PLACE_SIN_PICK";
+        case CausaFallaPick::CajaCaidaEnCinta:      return "CAJA_CAIDA_EN_CINTA";
+        case CausaFallaPick::TrayectoriaSinSuccion: return "TRAYECTORIA_SIN_SUCCION";
+        default:                                    return "NINGUNA";
     }
 }
 
@@ -557,9 +564,11 @@ void Controller::supervisarPickPunto(const PendingAutoCommand& punto, uint32_t n
         case FasePick::Elevacion:
             if (!efectorEncendido) {                        // Flanco 1->0 sin pick confirmado
                 if (_cinta.objetoPresente()) {
-                    fallarPick(CausaFallaPick::OcupadoEnSuelta);    // C2
+                    fallarPick(CausaFallaPick::PlaceSinPick);       // La caja nunca salio de la cinta
+                } else if (_fasePick == FasePick::Agarre) {
+                    fallarPick(CausaFallaPick::CajaMovida);         // Brazo quieto y sin caja: la sacaron
                 } else {
-                    confirmarPick(nowMs);
+                    confirmarPick(nowMs);                           // El IR se libero en este mismo ciclo
                     _fasePick = FasePick::Liberada;
                 }
             } else if (_fasePick == FasePick::Agarre) {
@@ -589,28 +598,29 @@ void Controller::supervisarPickSensor(uint32_t nowMs) {
     const bool ocupado = _cinta.objetoPresente();
 
     switch (_fasePick) {
-        case FasePick::Agarre:
         case FasePick::Elevacion:
             if (!ocupado) {
                 confirmarPick(nowMs);                       // El IR se libero con vacio: pick OK
-            } else if ((_fasePick == FasePick::Elevacion) &&
-                       ((nowMs - _tickInicioElevacion) >= Config::PICK_T_LIBERACION_MS)) {
-                fallarPick(CausaFallaPick::NoLibero);       // C1
+            } else if ((nowMs - _tickInicioElevacion) >= Config::PICK_T_LIBERACION_MS) {
+                fallarPick(CausaFallaPick::CajaNoLevantada);
             }
             return;
 
         case FasePick::Aproximacion:
+        case FasePick::Agarre:
         case FasePick::Traslado: {
-            // Desvios que deben sostenerse PICK_PERSISTENCIA_MS (filtra parpadeos del FC-51)
-            const bool desvio = (_fasePick == FasePick::Aproximacion) ? !ocupado : ocupado;
+            // Desvios que deben sostenerse PICK_PERSISTENCIA_MS (filtra parpadeos del FC-51).
+            // Antes de levantar la caja (bajada o succion con el brazo quieto) el IR debe verla;
+            // despues de confirmar el pick, no.
+            const bool desvio = (_fasePick == FasePick::Traslado) ? ocupado : !ocupado;
             if (!desvio) {
                 _anomaliaPickActiva = false;
             } else if (!_anomaliaPickActiva) {
                 _anomaliaPickActiva = true;
                 _tickAnomaliaPick = nowMs;
             } else if ((nowMs - _tickAnomaliaPick) >= Config::PICK_PERSISTENCIA_MS) {
-                fallarPick((_fasePick == FasePick::Aproximacion) ? CausaFallaPick::CajaRetirada   // C3
-                                                                 : CausaFallaPick::CajaCaida);    // C4
+                fallarPick((_fasePick == FasePick::Traslado) ? CausaFallaPick::CajaCaidaEnCinta
+                                                             : CausaFallaPick::CajaMovida);
             }
             return;
         }
@@ -1352,11 +1362,11 @@ void Controller::onUpdateAutoRunning(void) {
         } else if (_endOfTrajectoryPending) {
             // Fin de trayectoria sin pick confirmado: la caja sigue frente al IR
             if (_fasePick == FasePick::Aproximacion) {
-                fallarPick(CausaFallaPick::SinAgarre);
+                fallarPick(CausaFallaPick::TrayectoriaSinSuccion);  // Nunca encendio el efector
                 return;
             }
             if ((_fasePick == FasePick::Agarre) || (_fasePick == FasePick::Elevacion)) {
-                fallarPick(CausaFallaPick::NoLibero);
+                fallarPick(CausaFallaPick::CajaNoLevantada);
                 return;
             }
 
@@ -1401,10 +1411,12 @@ void Controller::onUpdatePickRecovery(void) {
 
     // 2. Decide el IR: con la caja todavia en posicion y reintentos disponibles, se relanza el
     //    mismo pick (la PC recibe EVT:SENSOR y vuelve a enviar la trayectoria del paso actual).
+    //    Una trayectoria sin succion no se reintenta: la misma trayectoria fallaria igual.
     const bool cajaPresente = _cinta.objetoPresente();
     const bool cicloArmado = (_cinta.getEstado() == EstadoCinta::EsperandoPick);
+    const bool reintentable = (_causaFallaPick != CausaFallaPick::TrayectoriaSinSuccion);
 
-    if (cajaPresente && cicloArmado && (_intentosPick <= Config::PICK_REINTENTOS_MAX)) {
+    if (reintentable && cajaPresente && cicloArmado && (_intentosPick <= Config::PICK_REINTENTOS_MAX)) {
         char msg[32];
         std::snprintf(msg, sizeof(msg), "EVT:PICK_RETRY,%u\r\n", static_cast<unsigned>(_intentosPick));
         _terminal.enviarNormal(msg);

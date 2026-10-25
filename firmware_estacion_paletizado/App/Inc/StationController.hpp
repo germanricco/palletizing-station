@@ -116,11 +116,11 @@ enum class FasePick : uint8_t {
  */
 enum class CausaFallaPick : uint8_t {
     Ninguna,
-    CajaRetirada,		/**< C3: el IR se libero con a1=0 (caja retirada o empujada antes del agarre). */
-    NoLibero,			/**< C1: el IR siguio ocupado PICK_T_LIBERACION_MS despues de empezar a subir. */
-    OcupadoEnSuelta,	/**< C2: el IR seguia ocupado al apagar el efector (la caja nunca salio). */
-    CajaCaida,			/**< C4: el IR volvio a ocuparse con a1=1 despues de liberarse (la caja cayo). */
-    SinAgarre			/**< Fin de trayectoria sin pick confirmado (sin flanco de a1 o sin liberar el IR). */
+    CajaMovida,				/**< El IR dejo de ver la caja antes de levantarla (bajada o succion): se movio o la sacaron. */
+    CajaNoLevantada,		/**< El IR siguio ocupado PICK_T_LIBERACION_MS despues de empezar a subir: la ventosa no la tomo. */
+    PlaceSinPick,			/**< Se apago el efector (place) con el IR ocupado y sin pick confirmado. */
+    CajaCaidaEnCinta,		/**< Pick confirmado y el IR volvio a ocuparse en el traslado: la caja cayo frente al sensor. */
+    TrayectoriaSinSuccion	/**< La trayectoria termino sin encender nunca el efector con una caja esperando. Sin reintento. */
 };
 
 
@@ -224,8 +224,8 @@ private:
     FasePick _fasePick;					/**< Fase de la secuencia IR/efector del pick en curso. */
     CausaFallaPick _causaFallaPick;		/**< Ultima causa de falla (para EVT:PICK_FAIL / EVT:PICK_ALARM). */
     uint8_t _intentosPick;				/**< Fallas consecutivas de la caja actual (0 tras un pick confirmado). */
-    uint32_t _tickInicioElevacion;		/**< Primer movimiento despues del agarre (base del plazo C1). */
-    bool _anomaliaPickActiva;			/**< Desvio del IR en curso (C3/C4), pendiente de persistencia. */
+    uint32_t _tickInicioElevacion;		/**< Primer movimiento despues del agarre (base del plazo de CAJA_NO_LEVANTADA). */
+    bool _anomaliaPickActiva;			/**< Desvio del IR en curso (CAJA_MOVIDA / CAJA_CAIDA_EN_CINTA), pendiente de persistencia. */
     uint32_t _tickAnomaliaPick;			/**< Inicio del desvio del IR en curso. */
     float _consignaAgarre[3];			/**< Consigna articular en el agarre [grados de firmware]. */
     bool _homeRecuperacionAlcanzado;	/**< PickRecovery: los 3 servos llegaron a Home. */

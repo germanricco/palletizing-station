@@ -88,8 +88,8 @@ namespace Config {
 	// compactada (eps = 0.04 grados) y que la resolucion de G1 (1e-4 rad = 0.006 grados).
 	constexpr float PICK_UMBRAL_MOVIMIENTO_GRADOS = 0.2f;
 
-	// Tiempo que debe sostenerse un desvio del IR (caja retirada antes del agarre o caja caida
-	// frente al sensor) para abortar. Filtra parpadeos del FC-51 con la caja cerca del borde de
+	// Tiempo que debe sostenerse un desvio del IR (CAJA_MOVIDA antes de levantarla o
+	// CAJA_CAIDA_EN_CINTA en el traslado) para abortar. Filtra parpadeos del FC-51 con la caja cerca del borde de
 	// deteccion; se suma al antirrebote de SENSOR_IR_DEBOUNCE_MS.
 	constexpr uint32_t PICK_PERSISTENCIA_MS = 150U;
 
