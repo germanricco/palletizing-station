@@ -135,7 +135,7 @@ void Cpp_Main_Init(void) {
 
     // Mensaje Inicial
     terminal.enviarNormal(
-        "PROTO: M98 M99 M100 M101 M110 M111 M112 M113 M114 M116 M120 M121 M122 M999 M00 STATUS\r\n");
+        "PROTO: M98 M99 M100 M101 M110 M111 M112 M113 M114 M115 M116 M120 M121 M122 M999 M00 STATUS\r\n");
 
     // Causa del arranque (RCC_CSR). Si la PC estaba conectada, EVT:BOOT le avisa que el
     // firmware se reinicio (p. ej. por el watchdog) y que su estado ya no es valido.

@@ -263,6 +263,8 @@ class DigitalTwin(QWidget):
             "RECORDING": AppConfig.COLORS.SEMANTIC_RECORD,
             "AUTO_RUNNING": AppConfig.COLORS.SEMANTIC_AUTO,
             "AUTO_READY": "#34C759", # O tu constante AppConfig equivalente
+            "AUTO_PICK_RECOVERY": AppConfig.COLORS.SEMANTIC_RECORD,  # pick fallido, volviendo a Home
+            "AUTO_PICK_ALARM": AppConfig.COLORS.SEMANTIC_ESTOP,      # espera al operador
             "FAULT": AppConfig.COLORS.SEMANTIC_ESTOP,
             "EMERGENCY": AppConfig.COLORS.SEMANTIC_ESTOP
         }

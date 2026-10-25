@@ -105,6 +105,13 @@ bool TerminalSerial::enqueue(TxPriority prio, const char* msg) {
     //Copiamos el mensaje al slot apuntado por tail.
     TxSlot& s = q[*t];
     memcpy(s.data, msg, len);
+    // Un mensaje mas largo que el slot se recorta y pierde su "\r\n": la PC lo pegaria con el
+    // mensaje siguiente y descartaria los dos (p. ej. un log largo seguido de un EVT:). Se fuerza
+    // el fin de linea en el recorte para que cada slot sea siempre una linea completa.
+    if ((len == TX_BUFFER_SIZE - 1U) && (msg[len] != '\0')) {
+        s.data[len - 2U] = '\r';
+        s.data[len - 1U] = '\n';
+    }
     s.data[len] = '\0';
     s.len = static_cast<uint16_t>(len);
 

@@ -7,6 +7,9 @@ from typing import Callable, Optional, List
 
 from utils.system_logger import SystemLogger
 from utils.trajectory_repository import TrajectoryRepository
+from utils.trajectory_compactor import (
+    CARPETA_GRAFICOS, DT_S, SUFIJO_COMPACTA, compactar, graficar_en_segundo_plano,
+)
 from control.robot_EEZYbotMK2 import RoboticArmMK2
 from communication.async_uart import AsyncUARTCommunicator
 from control.trajectory_streamer import TrajectoryStreamer, StreamState
@@ -21,8 +24,20 @@ class SystemState(Enum):
     AUTO_WAITING_SENSOR = "AUTO_WAITING_SENSOR"
     AUTO_RUNNING = "AUTO_RUNNING"
     AUTO_PAUSED = "AUTO_PAUSED"
+    AUTO_PICK_RECOVERY = "AUTO_PICK_RECOVERY"   # Pick fallido: el firmware vuelve a Home y decide
+    AUTO_PICK_ALARM = "AUTO_PICK_ALARM"         # Pick fallido sin reintentos: espera al operador
     FAULT = "FAULT"
     EMERGENCY = "EMERGENCY"
+
+
+# Causas de pick fallido informadas por el firmware (EVT:PICK_FAIL,<causa>,<intento>)
+_PICK_FAIL_CAUSES = {
+    "CAJA_MOVIDA": "La caja dejo de detectarse antes de levantarla: se movio o la sacaron de la cinta.",
+    "CAJA_NO_LEVANTADA": "El brazo subio pero la caja sigue en la cinta: la ventosa no la tomo (revisar vacio y posicion).",
+    "PLACE_SIN_PICK": "El brazo llego al place sin haber levantado la caja: sigue en la cinta.",
+    "CAJA_CAIDA_EN_CINTA": "Aparecio algo frente al sensor durante el traslado: probablemente la caja se solto y cayo en la cinta.",
+    "TRAYECTORIA_SIN_SUCCION": "La trayectoria termino sin encender la bomba: verifique que la trayectoria cargada sea la de pick.",
+}
 
 
 # Mapeo de los nombres de estado tal como los serializa el firmware (Controller::toString en
@@ -38,6 +53,8 @@ _FIRMWARE_STATE_NAMES = {
     "AutoReady": SystemState.AUTO_READY,
     "AutoRunning": SystemState.AUTO_RUNNING,
     "AutoPaused": SystemState.AUTO_PAUSED,
+    "PickRecovery": SystemState.AUTO_PICK_RECOVERY,
+    "PickAlarm": SystemState.AUTO_PICK_ALARM,
     "Fault": SystemState.FAULT,
     "Emergency": SystemState.EMERGENCY,
 }
@@ -185,8 +202,9 @@ class RobotController:
         # Desconexión (Hardware Sleep)
         if self.is_connected:
             # El firmware solo acepta M98 desde Idle/Manual/AutoReady: si hay una trayectoria
-            # en curso o pausada, primero se la saca con M99 (AutoRunning/AutoPaused -> Idle).
-            if self.current_state in (SystemState.AUTO_RUNNING, SystemState.AUTO_PAUSED):
+            # en curso, pausada o un pick fallido en tratamiento, primero se sale con M99 (-> Idle).
+            if self.current_state in (SystemState.AUTO_RUNNING, SystemState.AUTO_PAUSED,
+                                      SystemState.AUTO_PICK_RECOVERY, SystemState.AUTO_PICK_ALARM):
                 self.uart.send_message("M99")
             self.logger.debug("Enviando comando M98 (Hardware Sleep / Go to INIT)...")
             self.uart.send_message("M98")
@@ -379,8 +397,65 @@ class RobotController:
                     else:
                         self._change_internal_state(SystemState.AUTO_READY)
 
+        elif event_msg.startswith("PICK_"):
+            self._handle_pick_event(event_msg)
+
         else:
             self.logger.warning(f"Evento de hardware no reconocido: {event_msg}")
+
+    def _handle_pick_event(self, event_msg: str) -> None:
+        """
+        Supervision del pick con el sensor IR (decidida por el firmware):
+          PICK_OK,<ms>              pick confirmado (ms desde el inicio de la elevacion)
+          PICK_FAIL,<causa>,<n>     pick abortado: el firmware purga el vacio y vuelve a Home
+          PICK_RETRY,<n>            caja todavia en posicion: llega EVT:SENSOR y se relanza el pick
+          PICK_ALARM,<causa>        sin reintentos (o sin caja): espera CONTINUAR (M115) o CANCELAR (M113)
+        La caja que falla no se cuenta ni avanza la receta: el contador sigue sumando solo en
+        EVT:AUTO_COMPLETE, que el firmware no emite si el pick no se confirmo.
+        """
+        tipo, _, payload = event_msg.partition(",")
+        campos = payload.split(",") if payload else []
+
+        if tipo == "PICK_OK":
+            ms = campos[0] if campos else "?"
+            self.logger.info(f"Pick confirmado: el sensor dejo de ver la caja {ms} ms despues de empezar a subir.")
+            return
+
+        if tipo == "PICK_FAIL":
+            causa = campos[0] if campos else "DESCONOCIDA"
+            intento = campos[1] if len(campos) > 1 else "?"
+            self.logger.error(
+                f"PICK FALLIDO (intento {intento}): {_PICK_FAIL_CAUSES.get(causa, causa)} "
+                "Trayectoria abortada; el brazo vuelve a Home."
+            )
+            with self._cycle_lock:
+                # El firmware ya vacio su FIFO: cualquier REQ_CHUNK en vuelo debe ignorarse
+                self.streamer.reset()
+                self._pending_cycle_cmd = None
+                self._current_progress = 0
+                self._change_internal_state(SystemState.AUTO_PICK_RECOVERY)
+            return
+
+        if tipo == "PICK_RETRY":
+            with self._cycle_lock:
+                if self._cycle_active:
+                    self.logger.warning("La caja sigue en posicion: reintentando el pick automaticamente...")
+                    self._change_internal_state(SystemState.AUTO_WAITING_SENSOR)
+                else:
+                    self._change_internal_state(SystemState.AUTO_READY)
+            return
+
+        if tipo == "PICK_ALARM":
+            causa = campos[0] if campos else "DESCONOCIDA"
+            self.logger.critical(
+                f"ALARMA DE PICK: {_PICK_FAIL_CAUSES.get(causa, causa)} Revise la caja y la ventosa: "
+                "REANUDAR continua el ciclo (re-pick si la caja sigue frente al sensor; si la retiro, "
+                "la cinta avanza) y CANCELAR termina el ciclo."
+            )
+            self._change_internal_state(SystemState.AUTO_PICK_ALARM)
+            return
+
+        self.logger.warning(f"Evento de pick no reconocido: {event_msg}")
 
     def _handle_state_event(self, payload: str) -> None:
         """
@@ -441,7 +516,7 @@ class RobotController:
         if ack_msg == "ACK_M113":
             if self.current_state == SystemState.AUTO_RUNNING:
                 new_state = SystemState.AUTO_PAUSED
-            elif self.current_state == SystemState.AUTO_PAUSED:
+            elif self.current_state in (SystemState.AUTO_PAUSED, SystemState.AUTO_PICK_ALARM):
                 new_state = SystemState.AUTO_READY
                 # Cancelar una trayectoria pausada termina el ciclo automatico (el firmware ya
                 # desarmo la cinta al entrar a AutoReady desde AutoPaused). El streamer queda a
@@ -458,6 +533,14 @@ class RobotController:
 
             self.logger.debug(f"Confirmacion recibida: {ack_msg}. Sincronizando estado.")
             self._change_internal_state(new_state)
+            return
+
+        # ACK_M115: el operador retomo el ciclo tras una alarma de pick. Si la caja sigue frente
+        # al sensor, el firmware re-emite EVT:SENSOR a continuacion; si no, la cinta avanza.
+        if ack_msg == "ACK_M115":
+            with self._cycle_lock:
+                new_state = SystemState.AUTO_WAITING_SENSOR if self._cycle_active else SystemState.AUTO_READY
+                self._change_internal_state(new_state)
             return
 
         mapping = {
@@ -581,6 +664,7 @@ class RobotController:
             "M111": self.stop_recording,
             "M113": self._dispatch_pause_or_cancel,
             "M114": self.resume_trajectory,
+            "M115": self.continue_after_pick_alarm,
         }
 
         if base_cmd in state_commands_map:
@@ -654,7 +738,10 @@ class RobotController:
                   False si la transicion es invalida o el buffer de transmision esta lleno.
         """
         # Evaluacion de la Condicion de Guarda
-        valid_states = [SystemState.MANUAL, SystemState.AUTO_READY, SystemState.INIT]
+        # (Tambien desde un pick fallido: el firmware acepta M99 en PickRecovery/PickAlarm y
+        # Idle termina el ciclo, desarma la cinta y homea.)
+        valid_states = [SystemState.MANUAL, SystemState.AUTO_READY, SystemState.INIT,
+                        SystemState.AUTO_PICK_RECOVERY, SystemState.AUTO_PICK_ALARM]
 
         if self.current_state not in valid_states:
             self.logger.warning(f"Transicion a IDLE denegada. Incompatibilidad de estado.")
@@ -962,10 +1049,53 @@ class RobotController:
         # Si el usuario dejó el campo vacío, usamos un default
         if not filename:
             filename = f"record_{int(time.time())}"
+        if filename.lower().endswith(".npy"):
+            filename = filename[:-4]
 
-        self.repository.save_trajectory(filename, self._pending_save_matrix)
-        self.logger.info(f"Trayectoria '{filename}' guardada exitosamente.")
+        matrix = self._pending_save_matrix
         self._pending_save_matrix = None # Liberar RAM
+
+        # 1. La grabacion original va primero: pase lo que pase con la compacta, no se pierde
+        if not self.repository.save_trajectory(filename, matrix):
+            self.logger.error(f"No se pudo guardar la trayectoria '{filename}'.")
+            return
+        self.logger.info(f"Trayectoria '{filename}' guardada ({matrix.shape[0] * DT_S:.1f} s).")
+
+        # 2. Version compacta (sin tiempos muertos) + grafico comparativo en segundo plano
+        self._save_compacted_copy(filename, matrix)
+
+    def _save_compacted_copy(self, filename: str, matrix: np.ndarray) -> None:
+        """
+        Guarda <filename>_compacta.npy junto a la original y lanza el grafico comparativo
+        (ensayos/compactar/<filename>_compacta.png). Cualquier problema deja solo la original.
+        """
+        compact_name = filename + SUFIJO_COMPACTA
+        try:
+            compact, report = compactar(matrix)
+        except Exception as e:
+            self.logger.warning(f"No se pudo compactar '{filename}' ({e}). Queda solo la original.")
+            return
+
+        # La compacta conserva el primer punto y termina a < eps del final: si no vuelve a Home
+        # es porque la original tampoco lo hace (la GUI la bloqueara al ejecutar)
+        if not np.allclose(compact[0, :3], compact[-1, :3], atol=np.deg2rad(2.0)):
+            self.logger.warning(
+                f"La version compacta de '{filename}' no vuelve a Home ({report.rth_deg:.1f}°): "
+                "no se guardo. Revise que la grabacion termine en Home."
+            )
+            return
+
+        if not self.repository.save_trajectory(compact_name, compact):
+            self.logger.warning(f"No se pudo guardar '{compact_name}'. Queda solo la original.")
+            return
+
+        self.logger.info(
+            f"Version compacta '{compact_name}' guardada: {report.t_original_s:.1f} s -> "
+            f"{report.t_compacta_s:.1f} s (-{report.ahorro_pct:.0f} %), bomba encendida "
+            f"{report.t_bomba_original_s:.1f} s -> {report.t_bomba_compacta_s:.1f} s."
+        )
+        graficar_en_segundo_plano(matrix, compact, report,
+                                  CARPETA_GRAFICOS / f"{compact_name}.png", filename, self.logger)
 
     def load_single_trajectory(self, trajectory_name: str) -> bool:
         """
@@ -1107,22 +1237,38 @@ class RobotController:
 
     def resume_trajectory(self) -> bool:
         """
-        Solicita reanudar la ejecucion desde el punto exacto de interrupcion.
+        REANUDAR: desde AUTO_PAUSED retoma la trayectoria (M114); desde AUTO_PICK_ALARM retoma el
+        ciclo despues de que el operador reviso la caja (M115).
         """
+        if self.current_state == SystemState.AUTO_PICK_ALARM:
+            return self.continue_after_pick_alarm()
+
         if self.current_state != SystemState.AUTO_PAUSED:
             self.logger.warning(f"No se puede reanudar: El sistema no esta pausado.")
             return False
 
         return self._dispatch_command("M114", "Resume Trajectory")
-    
+
+    def continue_after_pick_alarm(self) -> bool:
+        """
+        Retoma el ciclo tras una alarma de pick (M115). El firmware decide con el sensor: si la
+        caja sigue frente al IR la vuelve a tomar; si el operador la retiro, la cinta avanza.
+        """
+        if self.current_state != SystemState.AUTO_PICK_ALARM:
+            self.logger.warning("No se puede continuar: no hay una alarma de pick activa.")
+            return False
+
+        return self._dispatch_command("M115", "Continuar ciclo tras alarma de pick")
+
     def cancel_trajectory(self) -> bool:
         """
-        Cancela la trayectoria pausada y limpia los buffers
+        CANCELAR: termina la trayectoria pausada o, ante una alarma de pick, el ciclo completo
+        (M113 en ambos casos; el firmware desarma la cinta).
         """
-        if self.current_state != SystemState.AUTO_PAUSED:
-            self.logger.warning(f"No se puede cancelar: El sistema no esta pausado.")
+        if self.current_state not in (SystemState.AUTO_PAUSED, SystemState.AUTO_PICK_ALARM):
+            self.logger.warning(f"No se puede cancelar: El sistema no esta pausado ni en alarma de pick.")
             return False
-        
+
         return self._dispatch_command("M113", "Cancel Trajectory")
 
     def _dispatch_pause_or_cancel(self) -> bool:
@@ -1133,7 +1279,7 @@ class RobotController:
         """
         if self.current_state == SystemState.AUTO_RUNNING:
             return self.stop_trajectory()
-        if self.current_state == SystemState.AUTO_PAUSED:
+        if self.current_state in (SystemState.AUTO_PAUSED, SystemState.AUTO_PICK_ALARM):
             return self.cancel_trajectory()
 
         self.logger.warning(f"Transicion M113 denegada. Incompatibilidad de estado.")

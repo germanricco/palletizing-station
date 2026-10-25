@@ -76,6 +76,31 @@ namespace Config {
 	constexpr uint32_t SENSOR_IR_DEBOUNCE_MS = 30U;
 
 	/**
+	 * ======== SUPERVISION DEL PICK (sensor IR de fin de cinta) ========
+	 */
+	// Plazo para que el IR se libere desde el primer movimiento posterior al agarre (a1 0->1).
+	// T_lib >= h_lib / v_z + margen. h_lib ~ 15 mm (elevacion medida para que el FC-51 deje de
+	// ver la caja). Calibrar con los tiempos que informa EVT:PICK_OK,<ms> (T_lib ~ 2 x maximo).
+	constexpr uint32_t PICK_T_LIBERACION_MS = 1500U;
+
+	// Desplazamiento minimo de la consigna (cualquier eje, grados de firmware) para considerar
+	// que el brazo empezo a subir despues del agarre. Mayor que el ruido de la trayectoria
+	// compactada (eps = 0.04 grados) y que la resolucion de G1 (1e-4 rad = 0.006 grados).
+	constexpr float PICK_UMBRAL_MOVIMIENTO_GRADOS = 0.2f;
+
+	// Tiempo que debe sostenerse un desvio del IR (CAJA_MOVIDA antes de levantarla o
+	// CAJA_CAIDA_EN_CINTA en el traslado) para abortar. Filtra parpadeos del FC-51 con la caja cerca del borde de
+	// deteccion; se suma al antirrebote de SENSOR_IR_DEBOUNCE_MS.
+	constexpr uint32_t PICK_PERSISTENCIA_MS = 150U;
+
+	// Reintentos automaticos del mismo pick antes de la alarma que espera al operador.
+	constexpr uint8_t PICK_REINTENTOS_MAX = 1U;
+
+	// Asentamiento despues del homing de recuperacion: los servos fisicos llegan a la consigna
+	// con atraso (no hay realimentacion) y el IR debe mostrar el estado real de la caja.
+	constexpr uint32_t PICK_ASENTAMIENTO_MS = 500U;
+
+	/**
 	 * ======== SEGURIDAD ========
 	 */
 	// Watchdog independiente (IWDG, oscilador LSI ~40 kHz, rango 30-60 kHz): prescaler /32 y recarga
